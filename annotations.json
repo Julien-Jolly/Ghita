@@ -1,0 +1,26 @@
+[
+  {
+    "timestamp": "2025-05-20 17:48:10",
+    "category": "Qualit\u00e9",
+    "intervenant": "\u00c9lectricien",
+    "comment": "revoir luminaires",
+    "photo": "photos\\b8e4bf35c8f021b87459d87092f996d4.jpg",
+    "status": "\u00c0 faire",
+    "x": 0.2625,
+    "y": 0.3097,
+    "width": 0.0775,
+    "height": 0.1345
+  },
+  {
+    "timestamp": "2025-05-20 17:48:40",
+    "category": "QHSE",
+    "intervenant": "Client",
+    "comment": "escalier",
+    "photo": "photos\\8b98db8ec504afe445efeff8023c75fd.jpg",
+    "status": "\u00c0 faire",
+    "x": 0.2075,
+    "y": 0.085,
+    "width": 0.0025,
+    "height": 0.0035
+  }
+]

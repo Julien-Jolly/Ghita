@@ -117,8 +117,8 @@ if uploaded_bytes:
         # ── COMPOSANT HTML AVEC PANZOOM ET FABRIC.JS ─────────────────────────────────
         st.subheader("Annotation du plan")
         html_code = f"""
-        <div id="panzoom-container" style="width: {container_width}px; height: {container_height}px; overflow: hidden;">
-            <canvas id="canvas" style="border: 1px solid #ccc;"></canvas>
+        <div id="panzoom-container" style="width: {container_width}px; height: {container_height}px; overflow: hidden; touch-action: none;">
+            <canvas id="canvas" style="border: 1px solid #ccc; touch-action: none;"></canvas>
         </div>
         <input type="hidden" id="annotation-data" value="">
         <script src="https://unpkg.com/@panzoom/panzoom@4.5.1/dist/panzoom.min.js"></script>
@@ -129,7 +129,7 @@ if uploaded_bytes:
                 const canvas = new fabric.Canvas('canvas', {{
                     width: {container_width},
                     height: {container_height},
-                    selection: false // Désactiver la sélection par défaut
+                    selection: false
                 }});
 
                 // Charger l'image de fond
@@ -146,66 +146,110 @@ if uploaded_bytes:
                     minScale: 0.5,
                     step: 0.1,
                     contain: 'outside',
-                    canvas: true
+                    canvas: true,
+                    panOnlyWhenZoomed: true // Déplacer uniquement si zoomé
                 }});
                 panzoomContainer.addEventListener('wheel', panzoom.zoomWithWheel);
 
-                // Gestion des clics pour ajouter des annotations
+                // Variables pour différencier clic et glissement
+                let startX, startY, isClick = true;
+                const clickThreshold = 5; // Distance minimale pour considérer un glissement
+                const clickDelay = 200; // Délai en ms pour considérer un clic
+
+                // Gestion des clics pour ajouter des annotations (desktop)
                 canvas.on('mouse:down', function(o) {{
                     const pointer = canvas.getPointer(o.e);
-                    const shape = new fabric.Circle({{
-                        left: pointer.x,
-                        top: pointer.y,
-                        radius: 5,
-                        fill: 'rgba(255,0,0,0.3)',
-                        stroke: '#FF0000',
-                        strokeWidth: 2,
-                        selectable: false
-                    }});
-                    canvas.add(shape);
-                    const zoom = panzoom.getScale();
-                    const pan = panzoom.getPan();
-                    const x = (shape.left + pan.x) / zoom / {original_w};
-                    const y = (shape.top + pan.y) / zoom / {original_h};
-                    const annotation = {{
-                        type: 'point',
-                        x: x,
-                        y: y,
-                        width: 5 / {original_w},
-                        height: 5 / {original_h}
-                    }};
-                    document.getElementById('annotation-data').value = JSON.stringify(annotation);
-                    canvas.remove(shape); // Retirer le point après l'enregistrement
-                    canvas.renderAll();
+                    startX = pointer.x;
+                    startY = pointer.y;
+                    isClick = true;
+                    setTimeout(() => isClick = false, clickDelay); // Réinitialiser après délai
+                }});
+
+                canvas.on('mouse:move', function(o) {{
+                    const pointer = canvas.getPointer(o.e);
+                    const dx = Math.abs(pointer.x - startX);
+                    const dy = Math.abs(pointer.y - startY);
+                    if (dx > clickThreshold || dy > clickThreshold) {{
+                        isClick = false; // C’est un glissement, pas un clic
+                    }}
+                }});
+
+                canvas.on('mouse:up', function(o) {{
+                    if (isClick) {{
+                        const pointer = canvas.getPointer(o.e);
+                        const shape = new fabric.Circle({{
+                            left: pointer.x,
+                            top: pointer.y,
+                            radius: 5,
+                            fill: 'rgba(255,0,0,0.3)',
+                            stroke: '#FF0000',
+                            strokeWidth: 2,
+                            selectable: false
+                        }});
+                        canvas.add(shape);
+                        const zoom = panzoom.getScale();
+                        const pan = panzoom.getPan();
+                        const x = (shape.left + pan.x) / zoom / {original_w};
+                        const y = (shape.top + pan.y) / zoom / {original_h};
+                        const annotation = {{
+                            type: 'point',
+                            x: x,
+                            y: y,
+                            width: 5 / {original_w},
+                            height: 5 / {original_h}
+                        }};
+                        document.getElementById('annotation-data').value = JSON.stringify(annotation);
+                        canvas.remove(shape); // Retirer après enregistrement
+                        canvas.renderAll();
+                    }}
                 }});
 
                 // Gestion des événements tactiles pour mobile
                 canvas.on('touch:start', function(o) {{
                     const pointer = canvas.getPointer(o.e);
-                    const shape = new fabric.Circle({{
-                        left: pointer.x,
-                        top: pointer.y,
-                        radius: 5,
-                        fill: 'rgba(255,0,0,0.3)',
-                        stroke: '#FF0000',
-                        strokeWidth: 2,
-                        selectable: false
-                    }});
-                    canvas.add(shape);
-                    const zoom = panzoom.getScale();
-                    const pan = panzoom.getPan();
-                    const x = (shape.left + pan.x) / zoom / {original_w};
-                    const y = (shape.top + pan.y) / zoom / {original_h};
-                    const annotation = {{
-                        type: 'point',
-                        x: x,
-                        y: y,
-                        width: 5 / {original_w},
-                        height: 5 / {original_h}
-                    }};
-                    document.getElementById('annotation-data').value = JSON.stringify(annotation);
-                    canvas.remove(shape); // Retirer le point après l'enregistrement
-                    canvas.renderAll();
+                    startX = pointer.x;
+                    startY = pointer.y;
+                    isClick = true;
+                    setTimeout(() => isClick = false, clickDelay);
+                }});
+
+                canvas.on('touch:move', function(o) {{
+                    const pointer = canvas.getPointer(o.e);
+                    const dx = Math.abs(pointer.x - startX);
+                    const dy = Math.abs(pointer.y - startY);
+                    if (dx > clickThreshold || dy > clickThreshold) {{
+                        isClick = false;
+                    }}
+                }});
+
+                canvas.on('touch:end', function(o) {{
+                    if (isClick) {{
+                        const pointer = canvas.getPointer(o.e);
+                        const shape = new fabric.Circle({{
+                            left: pointer.x,
+                            top: pointer.y,
+                            radius: 5,
+                            fill: 'rgba(255,0,0,0.3)',
+                            stroke: '#FF0000',
+                            strokeWidth: 2,
+                            selectable: false
+                        }});
+                        canvas.add(shape);
+                        const zoom = panzoom.getScale();
+                        const pan = panzoom.getPan();
+                        const x = (shape.left + pan.x) / zoom / {original_w};
+                        const y = (shape.top + pan.y) / zoom / {original_h};
+                        const annotation = {{
+                            type: 'point',
+                            x: x,
+                            y: y,
+                            width: 5 / {original_w},
+                            height: 5 / {original_h}
+                        }};
+                        document.getElementById('annotation-data').value = JSON.stringify(annotation);
+                        canvas.remove(shape); // Retirer après enregistrement
+                        canvas.renderAll();
+                    }}
                 }});
             }});
         </script>
@@ -214,7 +258,7 @@ if uploaded_bytes:
         # Affiche le composant dans Streamlit
         st.components.v1.html(html_code, height=container_height, width=container_width)
 
-        st.write("Utilisez la molette ou le pincement pour zoomer, glissez pour déplacer l’image, et cliquez (ou tap sur mobile) pour ajouter un point.")
+        st.write("Utilisez la molette ou le pincement pour zoomer, glissez pour déplacer l’image, et cliquez/tap pour ajouter un point.")
 
         # Récupérer les données d’annotation depuis JavaScript
         annotation_data = st.components.v1.html(
