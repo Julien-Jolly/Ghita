@@ -1,38 +1,14 @@
 # streamlit_app.py
 
-# ── Patch pour rétablir image_to_url quel que soit le nombre d'arguments -------------
-import base64
-import io
-import numpy as np
-from PIL import Image
-import streamlit.elements.image as _st_image
-
-
-def _custom_image_to_url(*args, **kwargs):
-    """
-    Ce patch intercepte tous les appels à image_to_url(...)
-    et accepte n'importe quel nombre d'arguments.
-    On prend le premier positional argument comme image.
-    """
-    img = args[0]
-    if isinstance(img, np.ndarray):
-        img = Image.fromarray(img)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    data = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return f"data:image/png;base64,{data}"
-
-
-# Injection du patch
-_st_image.image_to_url = _custom_image_to_url
-
 # ── Imports standards ---------------------------------------------------------------
 import streamlit as st
-from streamlit_drawable_canvas import st_canvas
 import pandas as pd
 from datetime import datetime
 import json
 import os
+import base64
+from io import BytesIO
+from PIL import Image
 
 # PDF → Image
 from pdf2image import convert_from_bytes
@@ -44,11 +20,11 @@ import msal
 import requests
 
 # ── CONFIGURATION -------------------------------------------------------------------
-CLIENT_ID = "votre_client_id"
-TENANT_ID = "votre_tenant_id"
+CLIENT_ID     = "votre_client_id"
+TENANT_ID     = "votre_tenant_id"
 CLIENT_SECRET = "votre_client_secret"
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES = ["https://graph.microsoft.com/.default"]
+AUTHORITY     = f"https://login.microsoftonline.com/{TENANT_ID}"
+SCOPES        = ["https://graph.microsoft.com/.default"]
 
 ANNOTATIONS_FILE = "annotations.json"
 if not os.path.exists(ANNOTATIONS_FILE):
@@ -61,7 +37,6 @@ if "annotations" not in st.session_state:
 
 st.title("BuildozAir Simplifié – Annotation de Plans")
 
-
 # ── FONCTIONS -----------------------------------------------------------------------
 def get_onedrive_token():
     app = msal.ConfidentialClientApplication(
@@ -70,13 +45,11 @@ def get_onedrive_token():
     result = app.acquire_token_for_client(scopes=SCOPES)
     return result.get("access_token")
 
-
 def list_onedrive_files():
-    token = get_onedrive_token()
+    token   = get_onedrive_token()
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
+    resp    = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
     return resp.json().get("value", [])
-
 
 def resize_image(image, max_width=800):
     """Redimensionne l'image si sa largeur dépasse max_width, tout en conservant le ratio d'aspect."""
@@ -86,27 +59,32 @@ def resize_image(image, max_width=800):
         image = image.resize((max_width, new_height), Image.LANCZOS)
     return image
 
+def image_to_base64(image):
+    """Convertit une image PIL en format base64 pour l’intégrer dans HTML."""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
 
 # ── CHOIX ET CHARGEMENT DU PLAN ------------------------------------------------------
 st.subheader("Choisir un plan")
-source = st.radio("Source du plan", ["Local", "OneDrive"])
+source         = st.radio("Source du plan", ["Local", "OneDrive"])
 uploaded_bytes = None
-selected_name = None
+selected_name  = None
 
 if source == "Local":
-    up = st.file_uploader("Uploadez votre plan (PNG, JPG, PDF)", type=["png", "jpg", "jpeg", "pdf"])
+    up = st.file_uploader("Uploadez votre plan (PNG, JPG, PDF)", type=["png","jpg","jpeg","pdf"])
     if up:
         uploaded_bytes = up.read()
-        selected_name = up.name
+        selected_name  = up.name
 else:
     files = list_onedrive_files()
-    names = [f["name"] for f in files if f["name"].lower().endswith((".png", ".jpg", ".jpeg", ".pdf"))]
+    names = [f["name"] for f in files if f["name"].lower().endswith((".png",".jpg",".jpeg",".pdf"))]
     selected_name = st.selectbox("Sélectionnez un fichier", names)
     if selected_name:
-        token = get_onedrive_token()
+        token   = get_onedrive_token()
         file_id = next(f["id"] for f in files if f["name"] == selected_name)
         headers = {"Authorization": f"Bearer {token}"}
-        resp = requests.get(f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}/content", headers=headers)
+        resp    = requests.get(f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}/content", headers=headers)
         uploaded_bytes = resp.content
 
 # ── CONVERSION EN IMAGE ------------------------------------------------------------
@@ -118,11 +96,11 @@ if uploaded_bytes:
                 pages = convert_from_bytes(uploaded_bytes, dpi=150)
                 image = pages[0]
             except PDFInfoNotInstalledError:
-                doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
-                pix = doc.load_page(0).get_pixmap()
+                doc  = fitz.open(stream=uploaded_bytes, filetype="pdf")
+                pix  = doc.load_page(0).get_pixmap()
                 image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         else:
-            image = Image.open(io.BytesIO(uploaded_bytes))
+            image = Image.open(BytesIO(uploaded_bytes))
     except Exception as e:
         st.error(f"Erreur lors du chargement du fichier : {e}")
         st.stop()
@@ -132,73 +110,198 @@ if uploaded_bytes:
         image = resize_image(image, max_width=800)
         original_w, original_h = image.size
 
-        # Ajouter un curseur pour le zoom
-        if "zoom_level" not in st.session_state:
-            st.session_state.zoom_level = 1.0  # Zoom par défaut (1x)
+        # Convertir l'image en base64 pour l'intégrer dans HTML
+        image_base64 = image_to_base64(image)
 
-        zoom_level = st.slider("Niveau de zoom", 0.5, 3.0, st.session_state.zoom_level, 0.1, key="zoom_slider")
-        st.session_state.zoom_level = zoom_level
+        # Définir une taille fixe pour la zone visible (conteneur)
+        container_width = 800
+        container_height = 600
 
-        # Redimensionner l'image selon le niveau de zoom
-        zoomed_w = int(original_w * zoom_level)
-        zoomed_h = int(original_h * zoom_level)
-        zoomed_image = image.resize((zoomed_w, zoomed_h), Image.LANCZOS)
+        # Mode de dessin (activé/désactivé)
+        if "drawing_mode" not in st.session_state:
+            st.session_state.drawing_mode = False
 
-        # Mettre à jour les dimensions pour le canevas
-        img_w, img_h = zoomed_image.size
+        drawing_mode = st.checkbox("Activer le mode dessin", value=st.session_state.drawing_mode)
+        st.session_state.drawing_mode = drawing_mode
 
+        # ── COMPOSANT HTML AVEC PANZOOM ET FABRIC.JS ─────────────────────────────────
         st.subheader("Annotation du plan")
-        canvas_result = st_canvas(
-            fill_color="rgba(255,0,0,0.3)",
-            stroke_width=2,
-            stroke_color="#FF0000",
-            background_image=zoomed_image,
-            update_streamlit=True,
-            height=img_h,
-            width=img_w,
-            drawing_mode="rect",
-            key="canvas",
+        html_code = f"""
+        <div id="panzoom-container" style="width: {container_width}px; height: {container_height}px; overflow: hidden;">
+            <canvas id="canvas" style="border: 1px solid #ccc;"></canvas>
+        </div>
+        <input type="hidden" id="annotation-data" value="">
+        <script src="https://unpkg.com/@panzoom/panzoom@4.5.1/dist/panzoom.min.js"></script>
+        <script src="https://unpkg.com/fabric@5.3.0/dist/fabric.min.js"></script>
+        <script>
+            document.addEventListener('DOMContentLoaded', function() {{
+                // Initialiser le canvas Fabric.js
+                const canvas = new fabric.Canvas('canvas', {{
+                    width: {container_width},
+                    height: {container_height}
+                }});
+
+                // Charger l'image de fond
+                fabric.Image.fromURL('data:image/png;base64,{image_base64}', function(img) {{
+                    img.scaleToWidth({container_width});
+                    img.scaleToHeight({container_height});
+                    canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas));
+                }});
+
+                // Initialiser Panzoom sur le conteneur
+                const panzoomContainer = document.getElementById('panzoom-container');
+                const panzoom = Panzoom(panzoomContainer, {{
+                    maxScale: 5,
+                    minScale: 0.5,
+                    step: 0.1,
+                    contain: 'outside',
+                    canvas: true,
+                    disablePan: {str(not drawing_mode).lower()} // Désactiver le déplacement si mode dessin actif
+                }});
+                panzoomContainer.addEventListener('wheel', panzoom.zoomWithWheel);
+
+                // Ajouter des logs pour débogage
+                console.log('Drawing mode:', {str(drawing_mode).lower()});
+
+                // Activer le dessin si le mode dessin est actif
+                let isDrawing = false;
+                let shape, origX, origY;
+                if ({str(drawing_mode).lower()}) {{
+                    canvas.selection = false; // Désactiver la sélection en mode dessin
+                    console.log('Drawing mode activated');
+
+                    canvas.on('mouse:down', function(o) {{
+                        console.log('Mouse down at:', canvas.getPointer(o.e));
+                        if (!isDrawing) {{
+                            isDrawing = true;
+                            const pointer = canvas.getPointer(o.e);
+                            origX = pointer.x;
+                            origY = pointer.y;
+
+                            // Si on relâche immédiatement, ce sera un point (petit cercle)
+                            shape = new fabric.Circle({{
+                                left: origX,
+                                top: origY,
+                                radius: 5,
+                                fill: 'rgba(255,0,0,0.3)',
+                                stroke: '#FF0000',
+                                strokeWidth: 2,
+                                selectable: false
+                            }});
+                            canvas.add(shape);
+                        }}
+                    }});
+
+                    canvas.on('mouse:move', function(o) {{
+                        if (!isDrawing) return;
+                        console.log('Mouse move');
+                        const pointer = canvas.getPointer(o.e);
+                        const dx = pointer.x - origX;
+                        const dy = pointer.y - origY;
+
+                        // Si le déplacement est significatif, convertir le point en rectangle
+                        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {{
+                            canvas.remove(shape);
+                            const zoom = panzoom.getScale();
+                            shape = new fabric.Rect({{
+                                left: origX,
+                                top: origY,
+                                width: dx / zoom,
+                                height: dy / zoom,
+                                fill: 'rgba(255,0,0,0.3)',
+                                stroke: '#FF0000',
+                                strokeWidth: 2,
+                                selectable: false
+                            }});
+                            canvas.add(shape);
+                        }}
+                    }});
+
+                    canvas.on('mouse:up', function(o) {{
+                        if (isDrawing) {{
+                            console.log('Mouse up');
+                            isDrawing = false;
+                            const zoom = panzoom.getScale();
+                            const pan = panzoom.getPan();
+                            const isPoint = shape instanceof fabric.Circle;
+                            const x = (shape.left + pan.x) / zoom / {original_w};
+                            const y = (shape.top + pan.y) / zoom / {original_h};
+                            const width = isPoint ? 5 / {original_w} : shape.width / {original_w};
+                            const height = isPoint ? 5 / {original_h} : shape.height / {original_h};
+                            const type = isPoint ? 'point' : 'rect';
+                            const annotation = {{
+                                type: type,
+                                x: x,
+                                y: y,
+                                width: width,
+                                height: height
+                            }};
+                            document.getElementById('annotation-data').value = JSON.stringify(annotation);
+                            canvas.remove(shape); // Retirer l'objet après l'enregistrement
+                            canvas.renderAll();
+                        }}
+                    }});
+                }} else {{
+                    canvas.selection = true; // Réactiver la sélection si mode dessin désactivé
+                    console.log('Drawing mode disabled');
+                }}
+            }});
+        </script>
+        """
+
+        # Affiche le composant dans Streamlit
+        st.components.v1.html(html_code, height=container_height, width=container_width)
+
+        st.write("Utilisez la molette pour zoomer, cliquez-glissez pour déplacer l’image (mode dessin désactivé), ou dessinez un rectangle/point en cliquant-glissant (mode dessin activé).")
+
+        # Récupérer les données d’annotation depuis JavaScript
+        annotation_data = st.components.v1.html(
+            """<span id="annotation-data-receiver"></span>""",
+            height=0,
+            width=0
         )
 
-        if canvas_result.json_data and canvas_result.json_data.get("objects"):
-            obj = canvas_result.json_data["objects"][-1]
-            # Ajuster les coordonnées en fonction du zoom
-            x, y = obj["left"] / zoom_level / original_w, obj["top"] / zoom_level / original_h
-            w, h = obj["width"] / zoom_level / original_w, obj["height"] / zoom_level / original_h
+        # Vérifier si une annotation a été dessinée
+        if annotation_data and "value" in dir(annotation_data):
+            try:
+                ann_data = json.loads(annotation_data.value)
+                if ann_data:
+                    st.sidebar.subheader("Détails de l'annotation")
+                    cat = st.sidebar.selectbox("Catégorie", ["QHSE", "Qualité", "Planning", "Autre"])
+                    ivt = st.sidebar.selectbox("Intervenant", ["Architecte", "Électricien", "Client", "Assistante"])
+                    cmt = st.sidebar.text_area("Commentaire")
+                    pf = st.sidebar.file_uploader("Ajouter une photo", type=["png", "jpg", "jpeg"])
+                    stt = st.sidebar.selectbox("Statut", ["À faire", "En cours", "Résolu"])
 
-            st.sidebar.subheader("Détails de l'annotation")
-            cat = st.sidebar.selectbox("Catégorie", ["QHSE", "Qualité", "Planning", "Autre"])
-            ivt = st.sidebar.selectbox("Intervenant", ["Architecte", "Électricien", "Client", "Assistante"])
-            cmt = st.sidebar.text_area("Commentaire")
-            pf = st.sidebar.file_uploader("Ajouter une photo", type=["png", "jpg", "jpeg"])
-            stt = st.sidebar.selectbox("Statut", ["À faire", "En cours", "Résolu"])
+                    photo_path = None
+                    if pf:
+                        os.makedirs("photos", exist_ok=True)
+                        photo_path = os.path.join("photos", pf.name)
+                        with open(photo_path, "wb") as f:
+                            f.write(pf.read())
 
-            photo_path = None
-            if pf:
-                os.makedirs("photos", exist_ok=True)
-                photo_path = os.path.join("photos", pf.name)
-                with open(photo_path, "wb") as f:
-                    f.write(pf.read())
+                    if st.sidebar.button("Ajouter annotation"):
+                        ann = {
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "category": cat,
+                            "intervenant": ivt,
+                            "comment": cmt,
+                            "photo": photo_path,
+                            "status": stt,
+                            "type": ann_data["type"],
+                            "x": round(ann_data["x"], 4),
+                            "y": round(ann_data["y"], 4),
+                            "width": round(ann_data["width"], 4),
+                            "height": round(ann_data["height"], 4),
+                        }
+                        st.session_state["annotations"].append(ann)
+                        with open(ANNOTATIONS_FILE, "w") as f:
+                            json.dump(st.session_state["annotations"], f, indent=2)
+                        st.rerun()
+            except json.JSONDecodeError:
+                pass
 
-            if st.sidebar.button("Ajouter annotation"):
-                ann = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "category": cat,
-                    "intervenant": ivt,
-                    "comment": cmt,
-                    "photo": photo_path,
-                    "status": stt,
-                    "x": round(x, 4),
-                    "y": round(y, 4),
-                    "width": round(w, 4),
-                    "height": round(h, 4),
-                }
-                st.session_state["annotations"].append(ann)
-                with open(ANNOTATIONS_FILE, "w") as f:
-                    json.dump(st.session_state["annotations"], f, indent=2)
-                st.experimental_rerun()
-
-# ── AFFICHAGE, FILTRAGE & EXPORT ----------------------------------------------------
+# ── AFFICHAGE, FILTRAGE & EXPORT ────────────────────────────────────────────────────
 if st.session_state["annotations"]:
     st.subheader("Annotations enregistrées")
     df = pd.DataFrame(st.session_state["annotations"])
@@ -216,7 +319,7 @@ if st.session_state["annotations"]:
         df["category"].isin(f_cats) &
         df["intervenant"].isin(f_ivts) &
         df["status"].isin(f_stats)
-        ]
+    ]
 
     st.subheader("Annotations filtrées")
     st.dataframe(filtered)
@@ -225,14 +328,14 @@ if st.session_state["annotations"]:
     idx = st.selectbox(
         "Sélectionner une annotation",
         filtered.index,
-        format_func=lambda i: f"{filtered.loc[i, 'timestamp']} – {filtered.loc[i, 'comment'][:30]}"
+        format_func=lambda i: f"{filtered.loc[i,'timestamp']} – {filtered.loc[i,'comment'][:30]}"
     )
     new_stt = st.selectbox("Nouveau statut", ["À faire", "En cours", "Résolu"], key="new_status")
     if st.button("Mettre à jour"):
         st.session_state["annotations"][idx]["status"] = new_stt
         with open(ANNOTATIONS_FILE, "w") as f:
             json.dump(st.session_state["annotations"], f, indent=2)
-        st.experimental_rerun()
+        st.rerun()
 
     if st.button("Exporter en CSV"):
         filtered.to_csv("annotations_export.csv", index=False)
