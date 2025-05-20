@@ -1,6 +1,3 @@
-# streamlit_app.py
-
-# ── Imports standards ---------------------------------------------------------------
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -117,13 +114,6 @@ if uploaded_bytes:
         container_width = 800
         container_height = 600
 
-        # Mode de dessin (activé/désactivé)
-        if "drawing_mode" not in st.session_state:
-            st.session_state.drawing_mode = False
-
-        drawing_mode = st.checkbox("Activer le mode dessin", value=st.session_state.drawing_mode)
-        st.session_state.drawing_mode = drawing_mode
-
         # ── COMPOSANT HTML AVEC PANZOOM ET FABRIC.JS ─────────────────────────────────
         st.subheader("Annotation du plan")
         html_code = f"""
@@ -138,7 +128,8 @@ if uploaded_bytes:
                 // Initialiser le canvas Fabric.js
                 const canvas = new fabric.Canvas('canvas', {{
                     width: {container_width},
-                    height: {container_height}
+                    height: {container_height},
+                    selection: false // Désactiver la sélection par défaut
                 }});
 
                 // Charger l'image de fond
@@ -155,96 +146,67 @@ if uploaded_bytes:
                     minScale: 0.5,
                     step: 0.1,
                     contain: 'outside',
-                    canvas: true,
-                    disablePan: {str(not drawing_mode).lower()} // Désactiver le déplacement si mode dessin actif
+                    canvas: true
                 }});
                 panzoomContainer.addEventListener('wheel', panzoom.zoomWithWheel);
 
-                // Ajouter des logs pour débogage
-                console.log('Drawing mode:', {str(drawing_mode).lower()});
-
-                // Activer le dessin si le mode dessin est actif
-                let isDrawing = false;
-                let shape, origX, origY;
-                if ({str(drawing_mode).lower()}) {{
-                    canvas.selection = false; // Désactiver la sélection en mode dessin
-                    console.log('Drawing mode activated');
-
-                    canvas.on('mouse:down', function(o) {{
-                        console.log('Mouse down at:', canvas.getPointer(o.e));
-                        if (!isDrawing) {{
-                            isDrawing = true;
-                            const pointer = canvas.getPointer(o.e);
-                            origX = pointer.x;
-                            origY = pointer.y;
-
-                            // Si on relâche immédiatement, ce sera un point (petit cercle)
-                            shape = new fabric.Circle({{
-                                left: origX,
-                                top: origY,
-                                radius: 5,
-                                fill: 'rgba(255,0,0,0.3)',
-                                stroke: '#FF0000',
-                                strokeWidth: 2,
-                                selectable: false
-                            }});
-                            canvas.add(shape);
-                        }}
+                // Gestion des clics pour ajouter des annotations
+                canvas.on('mouse:down', function(o) {{
+                    const pointer = canvas.getPointer(o.e);
+                    const shape = new fabric.Circle({{
+                        left: pointer.x,
+                        top: pointer.y,
+                        radius: 5,
+                        fill: 'rgba(255,0,0,0.3)',
+                        stroke: '#FF0000',
+                        strokeWidth: 2,
+                        selectable: false
                     }});
+                    canvas.add(shape);
+                    const zoom = panzoom.getScale();
+                    const pan = panzoom.getPan();
+                    const x = (shape.left + pan.x) / zoom / {original_w};
+                    const y = (shape.top + pan.y) / zoom / {original_h};
+                    const annotation = {{
+                        type: 'point',
+                        x: x,
+                        y: y,
+                        width: 5 / {original_w},
+                        height: 5 / {original_h}
+                    }};
+                    document.getElementById('annotation-data').value = JSON.stringify(annotation);
+                    canvas.remove(shape); // Retirer le point après l'enregistrement
+                    canvas.renderAll();
+                }});
 
-                    canvas.on('mouse:move', function(o) {{
-                        if (!isDrawing) return;
-                        console.log('Mouse move');
-                        const pointer = canvas.getPointer(o.e);
-                        const dx = pointer.x - origX;
-                        const dy = pointer.y - origY;
-
-                        // Si le déplacement est significatif, convertir le point en rectangle
-                        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {{
-                            canvas.remove(shape);
-                            const zoom = panzoom.getScale();
-                            shape = new fabric.Rect({{
-                                left: origX,
-                                top: origY,
-                                width: dx / zoom,
-                                height: dy / zoom,
-                                fill: 'rgba(255,0,0,0.3)',
-                                stroke: '#FF0000',
-                                strokeWidth: 2,
-                                selectable: false
-                            }});
-                            canvas.add(shape);
-                        }}
+                // Gestion des événements tactiles pour mobile
+                canvas.on('touch:start', function(o) {{
+                    const pointer = canvas.getPointer(o.e);
+                    const shape = new fabric.Circle({{
+                        left: pointer.x,
+                        top: pointer.y,
+                        radius: 5,
+                        fill: 'rgba(255,0,0,0.3)',
+                        stroke: '#FF0000',
+                        strokeWidth: 2,
+                        selectable: false
                     }});
-
-                    canvas.on('mouse:up', function(o) {{
-                        if (isDrawing) {{
-                            console.log('Mouse up');
-                            isDrawing = false;
-                            const zoom = panzoom.getScale();
-                            const pan = panzoom.getPan();
-                            const isPoint = shape instanceof fabric.Circle;
-                            const x = (shape.left + pan.x) / zoom / {original_w};
-                            const y = (shape.top + pan.y) / zoom / {original_h};
-                            const width = isPoint ? 5 / {original_w} : shape.width / {original_w};
-                            const height = isPoint ? 5 / {original_h} : shape.height / {original_h};
-                            const type = isPoint ? 'point' : 'rect';
-                            const annotation = {{
-                                type: type,
-                                x: x,
-                                y: y,
-                                width: width,
-                                height: height
-                            }};
-                            document.getElementById('annotation-data').value = JSON.stringify(annotation);
-                            canvas.remove(shape); // Retirer l'objet après l'enregistrement
-                            canvas.renderAll();
-                        }}
-                    }});
-                }} else {{
-                    canvas.selection = true; // Réactiver la sélection si mode dessin désactivé
-                    console.log('Drawing mode disabled');
-                }}
+                    canvas.add(shape);
+                    const zoom = panzoom.getScale();
+                    const pan = panzoom.getPan();
+                    const x = (shape.left + pan.x) / zoom / {original_w};
+                    const y = (shape.top + pan.y) / zoom / {original_h};
+                    const annotation = {{
+                        type: 'point',
+                        x: x,
+                        y: y,
+                        width: 5 / {original_w},
+                        height: 5 / {original_h}
+                    }};
+                    document.getElementById('annotation-data').value = JSON.stringify(annotation);
+                    canvas.remove(shape); // Retirer le point après l'enregistrement
+                    canvas.renderAll();
+                }});
             }});
         </script>
         """
@@ -252,7 +214,7 @@ if uploaded_bytes:
         # Affiche le composant dans Streamlit
         st.components.v1.html(html_code, height=container_height, width=container_width)
 
-        st.write("Utilisez la molette pour zoomer, cliquez-glissez pour déplacer l’image (mode dessin désactivé), ou dessinez un rectangle/point en cliquant-glissant (mode dessin activé).")
+        st.write("Utilisez la molette ou le pincement pour zoomer, glissez pour déplacer l’image, et cliquez (ou tap sur mobile) pour ajouter un point.")
 
         # Récupérer les données d’annotation depuis JavaScript
         annotation_data = st.components.v1.html(
