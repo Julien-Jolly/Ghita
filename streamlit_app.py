@@ -35,7 +35,7 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "eu-north-1")
 S3_BUCKET_NAME = "jujul"
-S3_PREFIX = "buildozair/"  # Dossier spécifique pour l'application
+S3_PREFIX = "buildozair/"
 
 try:
     s3_client = boto3.client(
@@ -54,9 +54,9 @@ def upload_to_s3(file_name, file_content):
         if not file_content or len(file_content) == 0:
             st.error(f"Contenu vide pour {file_name}.")
             return None
-        s3_key = S3_PREFIX + file_name  # Ajouter le préfixe
+        s3_key = S3_PREFIX + file_name
         s3_client.upload_fileobj(io.BytesIO(file_content), S3_BUCKET_NAME, s3_key)
-        return s3_key  # Retourner la clé complète avec préfixe
+        return s3_key
     except Exception as e:
         st.error(f"Erreur lors du téléversement de {file_name} sur S3 : {e}")
         return None
@@ -64,14 +64,14 @@ def upload_to_s3(file_name, file_content):
 def download_from_s3(file_key):
     try:
         if file_key and not file_key.startswith(S3_PREFIX):
-            file_key = S3_PREFIX + file_key  # Ajouter le préfixe si absent
+            file_key = S3_PREFIX + file_key
         response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=file_key)
         return response['Body'].read()
     except Exception as e:
         st.error(f"Erreur lors du téléchargement de {file_key} depuis S3 : {e}")
         return None
 
-# Migration des anciennes données avec mise à jour des clés
+# Migration des anciennes données
 for project in st.session_state["projects"]:
     for image in project.get("images", []):
         if "image_key" in image and not image["image_key"].startswith(S3_PREFIX):
@@ -80,8 +80,8 @@ for project in st.session_state["projects"]:
             try:
                 uploaded_bytes = download_from_s3(old_key)
                 if uploaded_bytes:
-                    upload_to_s3(old_key, uploaded_bytes)  # Téléverser avec nouveau préfixe
-                    s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=old_key)  # Supprimer l'ancienne clé
+                    upload_to_s3(old_key, uploaded_bytes)
+                    s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=old_key)
                     image["image_key"] = new_key
             except Exception as e:
                 st.error(f"Erreur lors de la migration de {old_key} : {e}")
@@ -282,13 +282,13 @@ if page == "Annoter":
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = ann["y"] * h
+                    y = (1 - ann["y"]) * h  # Correction : inversion de y (car Folium utilise un système de coordonnées inversé pour y)
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}", icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        bounds = [[y, x], [y + height, x + width]]
+                        bounds = [[h - (y + height), x], [h - y, x + width]]  # Correction des bounds pour rectangles
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2, popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False, draw_options={"polyline": False, "polygon": False, "circle": False, "circlemarker": False, "marker": True, "rectangle": True}, edit_options={"edit": True}).add_to(m)
                 st.subheader("Zoomer, déplacer et dessiner")
@@ -311,7 +311,7 @@ if page == "Annoter":
                     geom = feat["geometry"]
                     if geom["type"] == "Point":
                         y, x = geom["coordinates"]
-                        x_norm, y_norm = x/w, y/h
+                        x_norm, y_norm = x/w, 1 - (y/h)  # Correction : inversion de y lors de la normalisation
                         width_norm, height_norm = 0.0, 0.0
                         ann_type = "point"
                     else:
@@ -321,7 +321,7 @@ if page == "Annoter":
                         x_min, x_max = min(xs), max(xs)
                         y_min, y_max = min(ys), max(ys)
                         x_norm = x_min/w
-                        y_norm = y_min/h
+                        y_norm = 1 - (y_max/h)  # Correction : inversion de y pour rectangles
                         width_norm = (x_max - x_min)/w
                         height_norm = (y_max - y_min)/h
                         ann_type = "rectangle"
@@ -351,10 +351,10 @@ if page == "Annoter":
                     due_date = st.sidebar.date_input("Échéance", value=datetime.strptime(st.session_state["current_annotation"]["due_date"], "%Y-%m-%d") if st.session_state["current_annotation"]["due_date"] else datetime.today())
                     photo_path = None
                     if photo_file:
-                        os.makedirs("photos", exist_ok=True)
-                        photo_path = os.path.join("photos", photo_file.name)
-                        with open(photo_path, "wb") as f:
-                            f.write(photo_file.read())
+                        photo_name = f"photos/{photo_file.name}"
+                        photo_key = upload_to_s3(photo_name, photo_file.read())  # Stocker la photo sur S3
+                        if photo_key:
+                            photo_path = photo_key
                     if st.sidebar.button("Enregistrer l'annotation"):
                         ann = st.session_state["current_annotation"].copy()
                         ann.update({"category": category, "intervenant": intervenant, "comment": comment, "photo": photo_path, "status": status, "due_date": due_date.strftime("%Y-%m-%d")})
@@ -387,10 +387,20 @@ elif page == "Gérer":
                     if uploaded_bytes:
                         img = load_image_from_bytes(uploaded_bytes, image["image_name"])
                         if img:
-                            st.image(img, caption=image["image_name"], use_column_width=True)
+                            st.image(img, caption=image["image_name"], use_container_width=True)  # Correction : use_container_width
                 if image["annotations"]:
                     df = pd.DataFrame(image["annotations"])
                     st.write("### Annotations")
+                    for idx, row in df.iterrows():
+                        st.write(f"**Annotation {idx + 1} : {row['comment']}**")
+                        st.write(f"Type: {row['type']}, Statut: {row['status']}, Catégorie: {row['category']}, Intervenant: {row['intervenant']}, Échéance: {row['due_date']}")
+                        if row['photo']:
+                            photo_bytes = download_from_s3(row['photo'])
+                            if photo_bytes:
+                                photo_img = Image.open(io.BytesIO(photo_bytes))
+                                st.image(photo_img, caption="Photo associée", use_container_width=True)
+                            else:
+                                st.warning("Impossible de charger la photo associée.")
                     st.dataframe(df)
                 else:
                     st.write("Aucune annotation pour cette image.")
@@ -434,12 +444,19 @@ elif page == "Planning":
             st.warning("Aucune image dans ce projet.")
         else:
             all_annotations = pd.concat([pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]], ignore_index=True)
-            if "due_date" in all_annotations.columns:
-                all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"])
+            if not all_annotations.empty and "due_date" in all_annotations.columns:
+                # Convertir les due_date en datetime, en ignorant les valeurs vides ou mal formatées
+                all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
                 dr = st.date_input("Plage de dates", [], key="cal_range")
                 if len(dr) == 2:
                     start, end = dr
-                    filt = all_annotations[(all_annotations["due_date"] >= start) & (all_annotations["due_date"] <= end)]
-                    st.dataframe(filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
+                    start = pd.to_datetime(start)
+                    end = pd.to_datetime(end)
+                    # Filtrer en ignorant les lignes où due_date est NaT
+                    filt = all_annotations[all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (all_annotations["due_date"] <= end)]
+                    if not filt.empty:
+                        st.dataframe(filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
+                    else:
+                        st.info("Aucune tâche dans cette plage de dates.")
             else:
                 st.info("Pas d’échéance disponible.")
