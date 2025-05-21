@@ -4,8 +4,23 @@
     "images": [
       {
         "image_name": "Matterport Sample_BW.pdf",
-        "image_path": "images\\Matterport Sample_BW.pdf",
-        "annotations": []
+        "annotations": [
+          {
+            "timestamp": "2025-05-21 22:44:28",
+            "type": "rectangle",
+            "x": 0.3415,
+            "y": 0.5859,
+            "width": 0.0646,
+            "height": 0.1387,
+            "category": "Autre",
+            "intervenant": "Architecte",
+            "comment": "dfdfdfd",
+            "photo": "photos\\IMG-20250218-WA0001.jpg",
+            "status": "\u00c0 faire",
+            "due_date": "2025-05-21"
+          }
+        ],
+        "image_key": "Matterport Sample_BW.pdf"
       }
     ]
   },
@@ -14,7 +29,6 @@
     "images": [
       {
         "image_name": "Matterport Sample_BW.pdf",
-        "image_path": "images\\Matterport Sample_BW.pdf",
         "annotations": [
           {
             "timestamp": "2025-05-21 21:12:31",
@@ -71,8 +85,23 @@
             "photo": null,
             "status": "\u00c0 faire",
             "due_date": "2025-05-21"
+          },
+          {
+            "timestamp": "2025-05-21 21:29:13",
+            "type": "point",
+            "x": 0.5965,
+            "y": 0.5188,
+            "width": 0.0,
+            "height": 0.0,
+            "category": "Autre",
+            "intervenant": "Architecte",
+            "comment": "tedt now",
+            "photo": "photos\\Snapchat-1962918804.jpg",
+            "status": "\u00c0 faire",
+            "due_date": "2025-05-21"
           }
-        ]
+        ],
+        "image_key": "Matterport Sample_BW.pdf"
       }
     ]
   },
@@ -81,9 +110,25 @@
     "images": [
       {
         "image_name": "Matterport Sample_BW.pdf",
-        "image_path": "images\\Matterport Sample_BW.pdf",
-        "annotations": []
+        "annotations": [],
+        "image_key": "Matterport Sample_BW.pdf"
       }
     ]
+  },
+  {
+    "project_name": "truc",
+    "images": []
+  },
+  {
+    "project_name": "juju 22:40",
+    "images": []
+  },
+  {
+    "project_name": "jujul 22:41",
+    "images": []
+  },
+  {
+    "project_name": "juju 22:43",
+    "images": []
   }
 ]
