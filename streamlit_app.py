@@ -139,6 +139,8 @@ if "current_annotation" not in st.session_state:
     st.session_state["current_annotation"] = None
 if "last_drawings" not in st.session_state:
     st.session_state["last_drawings"] = []
+if "map_state" not in st.session_state:
+    st.session_state["map_state"] = {}
 
 # OneDrive configuration
 CLIENT_ID = "votre_client_id"
@@ -320,31 +322,49 @@ if page == "Annoter":
             if image:
                 arr = np.array(image)
                 h, w = arr.shape[:2]
-                m = folium.Map(location=[h / 2, w / 2], zoom_start=0, crs="Simple", min_zoom=-1, max_zoom=4,
-                               width="100%", height=600)
+                map_key = f"{selected_project}_{selected_image}"
+                # Restaurer le centre et le zoom depuis l'état
+                saved_state = st.session_state["map_state"].get(map_key, {})
+                default_center = saved_state.get("center", [h / 2, w / 2])
+                default_zoom = saved_state.get("zoom", 0)
+                m = folium.Map(
+                    location=default_center,
+                    zoom_start=default_zoom,
+                    crs="Simple",
+                    min_zoom=-1,
+                    max_zoom=4,
+                    width="100%",
+                    height=600
+                )
                 folium.raster_layers.ImageOverlay(image=arr, bounds=[[0, 0], [h, w]], interactive=True,
                                                   cross_origin=False, opacity=1).add_to(m)
                 image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == name)
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = (1 - ann["y"]) * h  # Inversion de l'axe Y pour correspondre à Folium (0 en bas)
+                    y = (1 - ann["y"]) * h  # Inversion Y
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}",
                                       icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
-                                  [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]  # Ajustement pour inversion Y
+                        # Ajustement des bounds pour éviter la rotation
+                        bounds = [[y - height, x], [y, x + width]]  # De (x,y-height) à (x+width,y)
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                          popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False,
                      draw_options={"polyline": False, "polygon": False, "circle": False, "circlemarker": False,
                                    "marker": True, "rectangle": True}, edit_options={"edit": True}).add_to(m)
                 st.subheader("Zoomer, déplacer et dessiner")
-                out = st_folium(m, width=800, height=600, returned_objects=["all_drawings"],
+                out = st_folium(m, width=800, height=600, returned_objects=["all_drawings", "center", "zoom"],
                                 key=f"folium_map_{selected_project}_{selected_image}")
+                # Sauvegarder le centre et le zoom
+                if out:
+                    st.session_state["map_state"][map_key] = {
+                        "center": out.get("center", [h / 2, w / 2]),
+                        "zoom": out.get("zoom", 0)
+                    }
                 feats = []
                 if out and "all_drawings" in out:
                     drawings = out.get("all_drawings", {})
@@ -363,7 +383,7 @@ if page == "Annoter":
                         geom = feat["geometry"]
                         if geom["type"] == "Point":
                             y, x = geom["coordinates"]
-                            x_norm, y_norm = x / w, 1 - (y / h)  # Inversion Y lors de la normalisation
+                            x_norm, y_norm = x / w, 1 - (y / h)  # Inversion Y
                             width_norm, height_norm = 0.0, 0.0
                             ann_type = "point"
                         else:
@@ -454,14 +474,16 @@ elif page == "Gérer":
             for i, image in enumerate(project["images"]):
                 st.subheader(f"Image : {image['image_name']}")
                 if "image_key" in image:
-                    image_url = generate_s3_url(image["image_key"])
-                    if image_url:
-                        st.markdown(
-                            f'<a href="{image_url}" target="_blank"><img src="{image_url}" width="200" style="object-fit:cover;"></a>',
-                            unsafe_allow_html=True)
-                        st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
-                    else:
-                        st.warning("Impossible de générer le lien pour cette image.")
+                    uploaded_bytes = download_from_s3(image["image_key"])
+                    if uploaded_bytes:
+                        img = load_image_from_bytes(uploaded_bytes, image["image_name"])
+                        if img:
+                            st.image(img, width=200, caption=f"Thumbnail de {image['image_name']}")
+                            image_url = generate_s3_url(image["image_key"])
+                            if image_url:
+                                st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
+                            else:
+                                st.warning("Impossible de générer le lien pour cette image.")
                 if image["annotations"]:
                     df = pd.DataFrame(image["annotations"])
                     st.write("### Annotations")
@@ -477,7 +499,6 @@ elif page == "Gérer":
                             else:
                                 st.warning("Impossible de charger la photo associée.")
                     st.dataframe(df)
-                    # Carte interactive pour les annotations
                     uploaded_bytes = download_from_s3(image["image_key"]) if "image_key" in image else None
                     if uploaded_bytes:
                         img = load_image_from_bytes(uploaded_bytes, image["image_name"])
@@ -490,15 +511,14 @@ elif page == "Gérer":
                                                               cross_origin=False, opacity=1).add_to(m)
                             for ann in image["annotations"]:
                                 x = ann["x"] * w
-                                y = (1 - ann["y"]) * h  # Inversion Y
+                                y = (1 - ann["y"]) * h
                                 if ann["type"] == "point":
                                     folium.Marker(location=[y, x], popup=f"{ann['comment']} (Statut: {ann['status']})",
                                                   icon=folium.Icon(color="red", icon="circle")).add_to(m)
                                 elif ann["type"] == "rectangle":
                                     width = ann["width"] * w
                                     height = ann["height"] * h
-                                    bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
-                                              [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]
+                                    bounds = [[y - height, x], [y, x + width]]
                                     folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                                      popup=f"{ann['comment']} (Statut: {ann['status']})").add_to(m)
                             st_folium(m, width=800, height=400,
