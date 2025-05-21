@@ -187,7 +187,6 @@ def delete_project(project_name):
     st.rerun()
 
 
-# Générer un lien temporaire pour les fichiers S3
 def generate_s3_url(file_key):
     try:
         url = s3_client.generate_presigned_url(
@@ -329,14 +328,15 @@ if page == "Annoter":
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = ann["y"] * h
+                    y = (1 - ann["y"]) * h  # Inversion de l'axe Y pour correspondre à Folium (0 en bas)
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}",
                                       icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        bounds = [[y, x], [y + height, x + width]]
+                        bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
+                                  [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]  # Ajustement pour inversion Y
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                          popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False,
@@ -353,17 +353,17 @@ if page == "Annoter":
                     else:
                         feats = drawings if isinstance(drawings, list) else []
 
-                # Vérifier si de nouveaux éléments ont été dessinés
                 current_drawings = sorted([(f["geometry"]["type"], tuple(
                     f["geometry"]["coordinates"][0] if f["geometry"]["type"] != "Point" else f["geometry"][
                         "coordinates"])) for f in feats])
                 if current_drawings != st.session_state["last_drawings"]:
-                    if feats and len(feats) > len(st.session_state["last_drawings"]):
-                        feat = feats[-1]  # Prendre le dernier élément ajouté
+                    if feats and len(feats) > len(
+                            [d for d in st.session_state["last_drawings"] if d[0] in ["Point", "Rectangle"]]):
+                        feat = feats[-1]
                         geom = feat["geometry"]
                         if geom["type"] == "Point":
                             y, x = geom["coordinates"]
-                            x_norm, y_norm = x / w, y / h
+                            x_norm, y_norm = x / w, 1 - (y / h)  # Inversion Y lors de la normalisation
                             width_norm, height_norm = 0.0, 0.0
                             ann_type = "point"
                         else:
@@ -373,7 +373,7 @@ if page == "Annoter":
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             x_norm = x_min / w
-                            y_norm = y_min / h
+                            y_norm = 1 - (y_max / h)  # Inversion Y
                             width_norm = (x_max - x_min) / w
                             height_norm = (y_max - y_min) / h
                             ann_type = "rectangle"
@@ -451,13 +451,14 @@ elif page == "Gérer":
         if not project["images"]:
             st.warning("Aucune image dans ce projet.")
         else:
-            for image in project["images"]:
+            for i, image in enumerate(project["images"]):
                 st.subheader(f"Image : {image['image_name']}")
                 if "image_key" in image:
                     image_url = generate_s3_url(image["image_key"])
                     if image_url:
-                        st.markdown(f'<a href="{image_url}" target="_blank"><img src="{image_url}" width="200"></a>',
-                                    unsafe_allow_html=True)
+                        st.markdown(
+                            f'<a href="{image_url}" target="_blank"><img src="{image_url}" width="200" style="object-fit:cover;"></a>',
+                            unsafe_allow_html=True)
                         st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
                     else:
                         st.warning("Impossible de générer le lien pour cette image.")
@@ -476,6 +477,32 @@ elif page == "Gérer":
                             else:
                                 st.warning("Impossible de charger la photo associée.")
                     st.dataframe(df)
+                    # Carte interactive pour les annotations
+                    uploaded_bytes = download_from_s3(image["image_key"]) if "image_key" in image else None
+                    if uploaded_bytes:
+                        img = load_image_from_bytes(uploaded_bytes, image["image_name"])
+                        if img:
+                            arr = np.array(img)
+                            h, w = arr.shape[:2]
+                            m = folium.Map(location=[h / 2, w / 2], zoom_start=0, crs="Simple", min_zoom=-1, max_zoom=4,
+                                           width="100%", height=400)
+                            folium.raster_layers.ImageOverlay(image=arr, bounds=[[0, 0], [h, w]], interactive=True,
+                                                              cross_origin=False, opacity=1).add_to(m)
+                            for ann in image["annotations"]:
+                                x = ann["x"] * w
+                                y = (1 - ann["y"]) * h  # Inversion Y
+                                if ann["type"] == "point":
+                                    folium.Marker(location=[y, x], popup=f"{ann['comment']} (Statut: {ann['status']})",
+                                                  icon=folium.Icon(color="red", icon="circle")).add_to(m)
+                                elif ann["type"] == "rectangle":
+                                    width = ann["width"] * w
+                                    height = ann["height"] * h
+                                    bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
+                                              [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]
+                                    folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
+                                                     popup=f"{ann['comment']} (Statut: {ann['status']})").add_to(m)
+                            st_folium(m, width=800, height=400,
+                                      key=f"manage_map_{selected_project}_{image['image_name']}")
                 else:
                     st.write("Aucune annotation pour cette image.")
             st.sidebar.header("Filtres")
