@@ -8,3 +8,4 @@ msal
 requests
 folium
 streamlit-folium
+boto3
