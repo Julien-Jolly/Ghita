@@ -43,6 +43,34 @@
             "photo": "photos\\Snapchat-1962918804.jpg",
             "status": "\u00c0 faire",
             "due_date": "2025-05-28"
+          },
+          {
+            "timestamp": "2025-05-21 21:19:12",
+            "type": "rectangle",
+            "x": 0.3387,
+            "y": 0.5967,
+            "width": 0.0691,
+            "height": 0.082,
+            "category": "Autre",
+            "intervenant": "Architecte",
+            "comment": "test 21:15",
+            "photo": null,
+            "status": "\u00c0 faire",
+            "due_date": "2025-05-21"
+          },
+          {
+            "timestamp": "2025-05-21 21:20:06",
+            "type": "point",
+            "x": 0.4468,
+            "y": 0.7803,
+            "width": 0.0,
+            "height": 0.0,
+            "category": "Autre",
+            "intervenant": "Architecte",
+            "comment": "test 21:16",
+            "photo": null,
+            "status": "\u00c0 faire",
+            "due_date": "2025-05-21"
           }
         ]
       }

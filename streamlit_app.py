@@ -107,51 +107,66 @@ if page == "Annoter":
             i for i, proj in enumerate(st.session_state["projects"]) if proj["project_name"] == selected_project)
         project = st.session_state["projects"][project_idx]
 
-        # 4.2) Choix du plan
-        source = st.radio("Source du plan", ["Local", "OneDrive"])
+        # 4.2) Sélection d’une image existante ou ajout d’une nouvelle
+        image_names = [img["image_name"] for img in project["images"]]
+        image_names.append("Ajouter une nouvelle image")
+        selected_image = st.selectbox("Sélectionnez une image", image_names)
+
         uploaded_bytes = None
         name = None
+        image_path = None
 
-        if source == "Local":
-            up = st.file_uploader("Uploadez PNG/JPG/PDF", type=["png", "jpg", "jpeg", "pdf"])
-            if up:
-                uploaded_bytes = up.read()
-                name = up.name
+        if selected_image == "Ajouter une nouvelle image":
+            # Logique pour ajouter une nouvelle image
+            source = st.radio("Source du plan", ["Local", "OneDrive"])
+            if source == "Local":
+                up = st.file_uploader("Uploadez PNG/JPG/PDF", type=["png", "jpg", "jpeg", "pdf"])
+                if up:
+                    uploaded_bytes = up.read()
+                    name = up.name
+            else:
+                files = list_onedrive_files()
+                names = [f["name"] for f in files if f["name"].lower().endswith((".png", ".jpg", ".jpeg", ".pdf"))]
+                name = st.selectbox("Sélectionnez un fichier OneDrive", names)
+                if name:
+                    token = get_onedrive_token()
+                    fid = next(f["id"] for f in files if f["name"] == name)
+                    headers = {"Authorization": f"Bearer {token}"}
+                    resp = requests.get(
+                        f"https://graph.microsoft.com/v1.0/me/drive/items/{fid}/content",
+                        headers=headers
+                    )
+                    uploaded_bytes = resp.content
+
+            if uploaded_bytes and name:
+                # Sauvegarder l’image localement
+                os.makedirs("images", exist_ok=True)
+                image_path = os.path.join("images", name)
+                with open(image_path, "wb") as f:
+                    f.write(uploaded_bytes)
+
+                # Ajouter l’image au projet si elle n’existe pas
+                image_exists = any(img["image_name"] == name for img in project["images"])
+                if not image_exists:
+                    project["images"].append({
+                        "image_name": name,
+                        "image_path": image_path,
+                        "annotations": []
+                    })
+                    with open(ANNOTATIONS_FILE, "w") as f:
+                        json.dump(st.session_state["projects"], f, indent=2)
+                    st.rerun()
         else:
-            files = list_onedrive_files()
-            names = [f["name"] for f in files if f["name"].lower().endswith((".png", ".jpg", ".jpeg", ".pdf"))]
-            name = st.selectbox("Sélectionnez un fichier OneDrive", names)
-            if name:
-                token = get_onedrive_token()
-                fid = next(f["id"] for f in files if f["name"] == name)
-                headers = {"Authorization": f"Bearer {token}"}
-                resp = requests.get(
-                    f"https://graph.microsoft.com/v1.0/me/drive/items/{fid}/content",
-                    headers=headers
-                )
-                uploaded_bytes = resp.content
+            # Charger une image existante
+            image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == selected_image)
+            image_data = project["images"][image_idx]
+            image_path = image_data["image_path"]
+            name = image_data["image_name"]
+            with open(image_path, "rb") as f:
+                uploaded_bytes = f.read()
 
-        # 4.3) Sauvegarde de l’image et conversion en PIL.Image
+        # 4.3) Charger l’image et afficher la carte avec les annotations existantes
         if uploaded_bytes and name:
-            # Sauvegarder l’image localement
-            os.makedirs("images", exist_ok=True)
-            image_path = os.path.join("images", name)
-            with open(image_path, "wb") as f:
-                f.write(uploaded_bytes)
-
-            # Vérifier si l’image existe déjà dans le projet
-            image_exists = any(img["image_name"] == name for img in project["images"])
-            if not image_exists:
-                project["images"].append({
-                    "image_name": name,
-                    "image_path": image_path,
-                    "annotations": []
-                })
-                with open(ANNOTATIONS_FILE, "w") as f:
-                    json.dump(st.session_state["projects"], f, indent=2)
-                st.rerun()
-
-            # Charger l’image pour annotation
             image = load_image_from_bytes(uploaded_bytes, name)
             if image:
                 arr = np.array(image)
@@ -175,7 +190,34 @@ if page == "Annoter":
                     opacity=1
                 ).add_to(m)
 
-                # 4.5) Plugin Draw : points et rectangles
+                # 4.5) Redessiner les annotations existantes
+                image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == name)
+                annotations = project["images"][image_idx]["annotations"]
+                for ann in annotations:
+                    # Dénormaliser les coordonnées
+                    x = ann["x"] * w
+                    y = ann["y"] * h
+                    if ann["type"] == "point":
+                        # Ajouter un marqueur pour les points
+                        folium.Marker(
+                            location=[y, x],
+                            popup=f"Point: {ann['comment']}",
+                            icon=folium.Icon(color="red", icon="circle")
+                        ).add_to(m)
+                    elif ann["type"] == "rectangle":
+                        # Ajouter un rectangle
+                        width = ann["width"] * w
+                        height = ann["height"] * h
+                        bounds = [[y, x], [y + height, x + width]]
+                        folium.Rectangle(
+                            bounds=bounds,
+                            color="blue",
+                            fill=True,
+                            fill_opacity=0.2,
+                            popup=f"Rectangle: {ann['comment']}"
+                        ).add_to(m)
+
+                # 4.6) Plugin Draw : points et rectangles
                 Draw(
                     export=False,
                     draw_options={
@@ -192,7 +234,7 @@ if page == "Annoter":
                 st.subheader("Zoomer, déplacer et dessiner")
                 out = st_folium(m, width=800, height=600, returned_objects=["all_drawings"])
 
-                # 4.6) Gestion des nouvelles annotations
+                # 4.7) Gestion des nouvelles annotations
                 feats = []
                 if out is not None:
                     if isinstance(out, list):
@@ -244,7 +286,7 @@ if page == "Annoter":
                     st.session_state["drawn_feats_count"] = len(feats)
                     st.rerun()
 
-                # 4.7) Formulaire pour la dernière annotation
+                # 4.8) Formulaire pour la dernière annotation
                 if st.session_state["current_annotation"]:
                     st.sidebar.header("Détails de la nouvelle annotation")
                     category = st.sidebar.selectbox("Catégorie", ["QHSE", "Qualité", "Planning", "Autre"],
