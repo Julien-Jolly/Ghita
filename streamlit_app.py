@@ -1,348 +1,381 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import folium
+from folium.plugins import Draw
+from streamlit_folium import st_folium
 from datetime import datetime
-import json
-import os
-import base64
-from io import BytesIO
 from PIL import Image
+import io, os, json
 
 # PDF → Image
 from pdf2image import convert_from_bytes
 from pdf2image.exceptions import PDFInfoNotInstalledError
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF fallback
 
-# OneDrive / MS Graph
-import msal
-import requests
+# OneDrive / Microsoft Graph
+import msal, requests
 
-# ── CONFIGURATION -------------------------------------------------------------------
-CLIENT_ID     = "votre_client_id"
-TENANT_ID     = "votre_tenant_id"
-CLIENT_SECRET = "votre_client_secret"
-AUTHORITY     = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES        = ["https://graph.microsoft.com/.default"]
+# ── 0) CONFIGURATION GLOBALE & STOCKAGE ────────────────────────────────────────
+st.set_page_config(page_title="BuildozAir Simplifié", layout="wide")
 
 ANNOTATIONS_FILE = "annotations.json"
 if not os.path.exists(ANNOTATIONS_FILE):
     with open(ANNOTATIONS_FILE, "w") as f:
         json.dump([], f)
-
-if "annotations" not in st.session_state:
+if "projects" not in st.session_state:
     with open(ANNOTATIONS_FILE, "r") as f:
-        st.session_state["annotations"] = json.load(f)
+        st.session_state["projects"] = json.load(f)
+# Ajout d’un projet par défaut si aucun projet n’existe
+if not st.session_state["projects"] or not any("project_name" in proj for proj in st.session_state["projects"]):
+    st.session_state["projects"] = [{"project_name": "Projet par défaut", "images": []}]
+    with open(ANNOTATIONS_FILE, "w") as f:
+        json.dump(st.session_state["projects"], f, indent=2)
+# Compteur des dessins déjà enregistrés
+if "drawn_feats_count" not in st.session_state:
+    st.session_state["drawn_feats_count"] = 0
+# Stockage temporaire de la dernière annotation
+if "current_annotation" not in st.session_state:
+    st.session_state["current_annotation"] = None
 
-st.title("BuildozAir Simplifié – Annotation de Plans")
+# ── 1) NAVIGATION DANS LA SIDEBAR ──────────────────────────────────────────────
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Aller à", ["Annoter", "Gérer", "Planning"])
 
-# ── FONCTIONS -----------------------------------------------------------------------
+# ── 2) CONFIG ONE DRIVE ─────────────────────────────────────────────────────────
+CLIENT_ID = "votre_client_id"
+TENANT_ID = "votre_tenant_id"
+CLIENT_SECRET = "votre_client_secret"
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+SCOPES = ["https://graph.microsoft.com/.default"]
+
+
 def get_onedrive_token():
     app = msal.ConfidentialClientApplication(
         CLIENT_ID, authority=AUTHORITY, client_credential=CLIENT_SECRET
     )
-    result = app.acquire_token_for_client(scopes=SCOPES)
-    return result.get("access_token")
+    res = app.acquire_token_for_client(scopes=SCOPES)
+    return res.get("access_token")
+
 
 def list_onedrive_files():
-    token   = get_onedrive_token()
+    token = get_onedrive_token()
     headers = {"Authorization": f"Bearer {token}"}
-    resp    = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
+    resp = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
     return resp.json().get("value", [])
 
-def resize_image(image, max_width=800):
-    """Redimensionne l'image si sa largeur dépasse max_width, tout en conservant le ratio d'aspect."""
-    if image.width > max_width:
-        ratio = max_width / image.width
-        new_height = int(image.height * ratio)
-        image = image.resize((max_width, new_height), Image.LANCZOS)
-    return image
 
-def image_to_base64(image):
-    """Convertit une image PIL en format base64 pour l’intégrer dans HTML."""
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
-
-# ── CHOIX ET CHARGEMENT DU PLAN ------------------------------------------------------
-st.subheader("Choisir un plan")
-source         = st.radio("Source du plan", ["Local", "OneDrive"])
-uploaded_bytes = None
-selected_name  = None
-
-if source == "Local":
-    up = st.file_uploader("Uploadez votre plan (PNG, JPG, PDF)", type=["png","jpg","jpeg","pdf"])
-    if up:
-        uploaded_bytes = up.read()
-        selected_name  = up.name
-else:
-    files = list_onedrive_files()
-    names = [f["name"] for f in files if f["name"].lower().endswith((".png",".jpg",".jpeg",".pdf"))]
-    selected_name = st.selectbox("Sélectionnez un fichier", names)
-    if selected_name:
-        token   = get_onedrive_token()
-        file_id = next(f["id"] for f in files if f["name"] == selected_name)
-        headers = {"Authorization": f"Bearer {token}"}
-        resp    = requests.get(f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}/content", headers=headers)
-        uploaded_bytes = resp.content
-
-# ── CONVERSION EN IMAGE ------------------------------------------------------------
-image = None
-if uploaded_bytes:
+# ── 3) HELPER : CHARGER IMAGE (PDF OU JPEG/PNG) ─────────────────────────────────
+def load_image_from_bytes(uploaded_bytes, name):
     try:
-        if selected_name.lower().endswith(".pdf"):
+        if name.lower().endswith(".pdf"):
             try:
                 pages = convert_from_bytes(uploaded_bytes, dpi=150)
-                image = pages[0]
+                return pages[0]
             except PDFInfoNotInstalledError:
-                doc  = fitz.open(stream=uploaded_bytes, filetype="pdf")
-                pix  = doc.load_page(0).get_pixmap()
-                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                doc = fitz.open(stream=uploaded_bytes, filetype="pdf")
+                pix = doc.load_page(0).get_pixmap()
+                return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         else:
-            image = Image.open(BytesIO(uploaded_bytes))
+            return Image.open(io.BytesIO(uploaded_bytes))
     except Exception as e:
-        st.error(f"Erreur lors du chargement du fichier : {e}")
-        st.stop()
+        st.error(f"Erreur chargement image : {e}")
+        return None
 
-    if image:
-        # Redimensionner l'image pour l'adapter à l'affichage initial
-        image = resize_image(image, max_width=800)
-        original_w, original_h = image.size
 
-        # Convertir l'image en base64 pour l'intégrer dans HTML
-        image_base64 = image_to_base64(image)
+# ── 4) PAGE “Annoter” ──────────────────────────────────────────────────────────
+if page == "Annoter":
+    st.header("Annoter le plan")
 
-        # Définir une taille fixe pour la zone visible (conteneur)
-        container_width = 800
-        container_height = 600
+    # 4.1) Sélection ou création d’un projet
+    project_names = [proj["project_name"] for proj in st.session_state["projects"] if "project_name" in proj]
+    project_names.append("Nouveau projet")
+    selected_project = st.selectbox("Sélectionnez un projet", project_names)
 
-        # ── COMPOSANT HTML AVEC PANZOOM ET FABRIC.JS ─────────────────────────────────
-        st.subheader("Annotation du plan")
-        html_code = f"""
-        <div id="panzoom-container" style="width: {container_width}px; height: {container_height}px; overflow: hidden; touch-action: none;">
-            <canvas id="canvas" style="border: 1px solid #ccc; touch-action: none;"></canvas>
-        </div>
-        <input type="hidden" id="annotation-data" value="">
-        <script src="https://unpkg.com/@panzoom/panzoom@4.5.1/dist/panzoom.min.js"></script>
-        <script src="https://unpkg.com/fabric@5.3.0/dist/fabric.min.js"></script>
-        <script>
-            document.addEventListener('DOMContentLoaded', function() {{
-                // Initialiser le canvas Fabric.js
-                const canvas = new fabric.Canvas('canvas', {{
-                    width: {container_width},
-                    height: {container_height},
-                    selection: false
-                }});
+    if selected_project == "Nouveau projet":
+        new_project_name = st.text_input("Nom du nouveau projet")
+        if st.button("Créer le projet") and new_project_name:
+            st.session_state["projects"].append({
+                "project_name": new_project_name,
+                "images": []
+            })
+            with open(ANNOTATIONS_FILE, "w") as f:
+                json.dump(st.session_state["projects"], f, indent=2)
+            st.rerun()
+    else:
+        project_idx = next(
+            i for i, proj in enumerate(st.session_state["projects"]) if proj["project_name"] == selected_project)
+        project = st.session_state["projects"][project_idx]
 
-                // Charger l'image de fond
-                fabric.Image.fromURL('data:image/png;base64,{image_base64}', function(img) {{
-                    img.scaleToWidth({container_width});
-                    img.scaleToHeight({container_height});
-                    canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas));
-                }});
+        # 4.2) Choix du plan
+        source = st.radio("Source du plan", ["Local", "OneDrive"])
+        uploaded_bytes = None
+        name = None
 
-                // Initialiser Panzoom sur le conteneur
-                const panzoomContainer = document.getElementById('panzoom-container');
-                const panzoom = Panzoom(panzoomContainer, {{
-                    maxScale: 5,
-                    minScale: 0.5,
-                    step: 0.1,
-                    contain: 'outside',
-                    canvas: true,
-                    panOnlyWhenZoomed: true // Déplacer uniquement si zoomé
-                }});
-                panzoomContainer.addEventListener('wheel', panzoom.zoomWithWheel);
+        if source == "Local":
+            up = st.file_uploader("Uploadez PNG/JPG/PDF", type=["png", "jpg", "jpeg", "pdf"])
+            if up:
+                uploaded_bytes = up.read()
+                name = up.name
+        else:
+            files = list_onedrive_files()
+            names = [f["name"] for f in files if f["name"].lower().endswith((".png", ".jpg", ".jpeg", ".pdf"))]
+            name = st.selectbox("Sélectionnez un fichier OneDrive", names)
+            if name:
+                token = get_onedrive_token()
+                fid = next(f["id"] for f in files if f["name"] == name)
+                headers = {"Authorization": f"Bearer {token}"}
+                resp = requests.get(
+                    f"https://graph.microsoft.com/v1.0/me/drive/items/{fid}/content",
+                    headers=headers
+                )
+                uploaded_bytes = resp.content
 
-                // Variables pour différencier clic et glissement
-                let startX, startY, isClick = true;
-                const clickThreshold = 5; // Distance minimale pour considérer un glissement
-                const clickDelay = 200; // Délai en ms pour considérer un clic
+        # 4.3) Sauvegarde de l’image et conversion en PIL.Image
+        if uploaded_bytes and name:
+            # Sauvegarder l’image localement
+            os.makedirs("images", exist_ok=True)
+            image_path = os.path.join("images", name)
+            with open(image_path, "wb") as f:
+                f.write(uploaded_bytes)
 
-                // Gestion des clics pour ajouter des annotations (desktop)
-                canvas.on('mouse:down', function(o) {{
-                    const pointer = canvas.getPointer(o.e);
-                    startX = pointer.x;
-                    startY = pointer.y;
-                    isClick = true;
-                    setTimeout(() => isClick = false, clickDelay); // Réinitialiser après délai
-                }});
+            # Vérifier si l’image existe déjà dans le projet
+            image_exists = any(img["image_name"] == name for img in project["images"])
+            if not image_exists:
+                project["images"].append({
+                    "image_name": name,
+                    "image_path": image_path,
+                    "annotations": []
+                })
+                with open(ANNOTATIONS_FILE, "w") as f:
+                    json.dump(st.session_state["projects"], f, indent=2)
+                st.rerun()
 
-                canvas.on('mouse:move', function(o) {{
-                    const pointer = canvas.getPointer(o.e);
-                    const dx = Math.abs(pointer.x - startX);
-                    const dy = Math.abs(pointer.y - startY);
-                    if (dx > clickThreshold || dy > clickThreshold) {{
-                        isClick = false; // C’est un glissement, pas un clic
-                    }}
-                }});
+            # Charger l’image pour annotation
+            image = load_image_from_bytes(uploaded_bytes, name)
+            if image:
+                arr = np.array(image)
+                h, w = arr.shape[:2]
 
-                canvas.on('mouse:up', function(o) {{
-                    if (isClick) {{
-                        const pointer = canvas.getPointer(o.e);
-                        const shape = new fabric.Circle({{
-                            left: pointer.x,
-                            top: pointer.y,
-                            radius: 5,
-                            fill: 'rgba(255,0,0,0.3)',
-                            stroke: '#FF0000',
-                            strokeWidth: 2,
-                            selectable: false
-                        }});
-                        canvas.add(shape);
-                        const zoom = panzoom.getScale();
-                        const pan = panzoom.getPan();
-                        const x = (shape.left + pan.x) / zoom / {original_w};
-                        const y = (shape.top + pan.y) / zoom / {original_h};
-                        const annotation = {{
-                            type: 'point',
-                            x: x,
-                            y: y,
-                            width: 5 / {original_w},
-                            height: 5 / {original_h}
-                        }};
-                        document.getElementById('annotation-data').value = JSON.stringify(annotation);
-                        canvas.remove(shape); // Retirer après enregistrement
-                        canvas.renderAll();
-                    }}
-                }});
+                # 4.4) Carte Leaflet (CRS Simple pour pixels)
+                m = folium.Map(
+                    location=[h / 2, w / 2],
+                    zoom_start=0,
+                    crs="Simple",
+                    min_zoom=-1,
+                    max_zoom=4,
+                    width="100%",
+                    height=600
+                )
+                folium.raster_layers.ImageOverlay(
+                    image=arr,
+                    bounds=[[0, 0], [h, w]],
+                    interactive=True,
+                    cross_origin=False,
+                    opacity=1
+                ).add_to(m)
 
-                // Gestion des événements tactiles pour mobile
-                canvas.on('touch:start', function(o) {{
-                    const pointer = canvas.getPointer(o.e);
-                    startX = pointer.x;
-                    startY = pointer.y;
-                    isClick = true;
-                    setTimeout(() => isClick = false, clickDelay);
-                }});
+                # 4.5) Plugin Draw : points et rectangles
+                Draw(
+                    export=False,
+                    draw_options={
+                        "polyline": False,
+                        "polygon": False,
+                        "circle": False,
+                        "circlemarker": False,
+                        "marker": True,
+                        "rectangle": True
+                    },
+                    edit_options={"edit": True}
+                ).add_to(m)
 
-                canvas.on('touch:move', function(o) {{
-                    const pointer = canvas.getPointer(o.e);
-                    const dx = Math.abs(pointer.x - startX);
-                    const dy = Math.abs(pointer.y - startY);
-                    if (dx > clickThreshold || dy > clickThreshold) {{
-                        isClick = false;
-                    }}
-                }});
+                st.subheader("Zoomer, déplacer et dessiner")
+                out = st_folium(m, width=800, height=600, returned_objects=["all_drawings"])
 
-                canvas.on('touch:end', function(o) {{
-                    if (isClick) {{
-                        const pointer = canvas.getPointer(o.e);
-                        const shape = new fabric.Circle({{
-                            left: pointer.x,
-                            top: pointer.y,
-                            radius: 5,
-                            fill: 'rgba(255,0,0,0.3)',
-                            stroke: '#FF0000',
-                            strokeWidth: 2,
-                            selectable: false
-                        }});
-                        canvas.add(shape);
-                        const zoom = panzoom.getScale();
-                        const pan = panzoom.getPan();
-                        const x = (shape.left + pan.x) / zoom / {original_w};
-                        const y = (shape.top + pan.y) / zoom / {original_h};
-                        const annotation = {{
-                            type: 'point',
-                            x: x,
-                            y: y,
-                            width: 5 / {original_w},
-                            height: 5 / {original_h}
-                        }};
-                        document.getElementById('annotation-data').value = JSON.stringify(annotation);
-                        canvas.remove(shape); // Retirer après enregistrement
-                        canvas.renderAll();
-                    }}
-                }});
-            }});
-        </script>
-        """
+                # 4.6) Gestion des nouvelles annotations
+                feats = []
+                if out is not None:
+                    if isinstance(out, list):
+                        feats = out
+                    elif isinstance(out, dict):
+                        drawings = out.get("all_drawings", {})
+                        if isinstance(drawings, dict):
+                            feats = drawings.get("features", [])
+                        else:
+                            feats = drawings if isinstance(drawings, list) else []
+                    else:
+                        feats = []
 
-        # Affiche le composant dans Streamlit
-        st.components.v1.html(html_code, height=container_height, width=container_width)
+                prev_count = st.session_state["drawn_feats_count"]
+                if len(feats) > prev_count:
+                    feat = feats[-1]
+                    geom = feat["geometry"]
+                    if geom["type"] == "Point":
+                        y, x = geom["coordinates"]
+                        x_norm, y_norm = x / w, y / h
+                        width_norm, height_norm = 0.0, 0.0
+                        ann_type = "point"
+                    else:
+                        coords = geom["coordinates"][0][:-1]
+                        xs = [pt[1] for pt in coords]
+                        ys = [pt[0] for pt in coords]
+                        x_min, x_max = min(xs), max(xs)
+                        y_min, y_max = min(ys), max(ys)
+                        x_norm = x_min / w
+                        y_norm = y_min / h
+                        width_norm = (x_max - x_min) / w
+                        height_norm = (y_max - y_min) / h
+                        ann_type = "rectangle"
 
-        st.write("Utilisez la molette ou le pincement pour zoomer, glissez pour déplacer l’image, et cliquez/tap pour ajouter un point.")
+                    st.session_state["current_annotation"] = {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "type": ann_type,
+                        "x": round(x_norm, 4),
+                        "y": round(y_norm, 4),
+                        "width": round(width_norm, 4),
+                        "height": round(height_norm, 4),
+                        "category": "Autre",
+                        "intervenant": "",
+                        "comment": "",
+                        "photo": None,
+                        "status": "À faire",
+                        "due_date": ""
+                    }
+                    st.session_state["drawn_feats_count"] = len(feats)
+                    st.rerun()
 
-        # Récupérer les données d’annotation depuis JavaScript
-        annotation_data = st.components.v1.html(
-            """<span id="annotation-data-receiver"></span>""",
-            height=0,
-            width=0
-        )
-
-        # Vérifier si une annotation a été dessinée
-        if annotation_data and "value" in dir(annotation_data):
-            try:
-                ann_data = json.loads(annotation_data.value)
-                if ann_data:
-                    st.sidebar.subheader("Détails de l'annotation")
-                    cat = st.sidebar.selectbox("Catégorie", ["QHSE", "Qualité", "Planning", "Autre"])
-                    ivt = st.sidebar.selectbox("Intervenant", ["Architecte", "Électricien", "Client", "Assistante"])
-                    cmt = st.sidebar.text_area("Commentaire")
-                    pf = st.sidebar.file_uploader("Ajouter une photo", type=["png", "jpg", "jpeg"])
-                    stt = st.sidebar.selectbox("Statut", ["À faire", "En cours", "Résolu"])
+                # 4.7) Formulaire pour la dernière annotation
+                if st.session_state["current_annotation"]:
+                    st.sidebar.header("Détails de la nouvelle annotation")
+                    category = st.sidebar.selectbox("Catégorie", ["QHSE", "Qualité", "Planning", "Autre"],
+                                                    index=["QHSE", "Qualité", "Planning", "Autre"].index(
+                                                        st.session_state["current_annotation"]["category"]))
+                    intervenant = st.sidebar.selectbox("Intervenant",
+                                                       ["Architecte", "Électricien", "Client", "Assistante"],
+                                                       index=0 if not st.session_state["current_annotation"][
+                                                           "intervenant"] else ["Architecte", "Électricien", "Client",
+                                                                                "Assistante"].index(
+                                                           st.session_state["current_annotation"]["intervenant"]))
+                    comment = st.sidebar.text_area("Commentaire",
+                                                   value=st.session_state["current_annotation"]["comment"])
+                    photo_file = st.sidebar.file_uploader("Ajouter une photo", type=["png", "jpg", "jpeg"])
+                    status = st.sidebar.selectbox("Statut", ["À faire", "En cours", "Résolu"],
+                                                  index=["À faire", "En cours", "Résolu"].index(
+                                                      st.session_state["current_annotation"]["status"]))
+                    due_date = st.sidebar.date_input("Échéance", value=datetime.strptime(
+                        st.session_state["current_annotation"]["due_date"], "%Y-%m-%d") if
+                    st.session_state["current_annotation"]["due_date"] else datetime.today())
 
                     photo_path = None
-                    if pf:
+                    if photo_file:
                         os.makedirs("photos", exist_ok=True)
-                        photo_path = os.path.join("photos", pf.name)
+                        photo_path = os.path.join("photos", photo_file.name)
                         with open(photo_path, "wb") as f:
-                            f.write(pf.read())
+                            f.write(photo_file.read())
 
-                    if st.sidebar.button("Ajouter annotation"):
-                        ann = {
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "category": cat,
-                            "intervenant": ivt,
-                            "comment": cmt,
+                    if st.sidebar.button("Enregistrer l'annotation"):
+                        ann = st.session_state["current_annotation"].copy()
+                        ann.update({
+                            "category": category,
+                            "intervenant": intervenant,
+                            "comment": comment,
                             "photo": photo_path,
-                            "status": stt,
-                            "type": ann_data["type"],
-                            "x": round(ann_data["x"], 4),
-                            "y": round(ann_data["y"], 4),
-                            "width": round(ann_data["width"], 4),
-                            "height": round(ann_data["height"], 4),
-                        }
-                        st.session_state["annotations"].append(ann)
+                            "status": status,
+                            "due_date": due_date.strftime("%Y-%m-%d")
+                        })
+                        image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == name)
+                        project["images"][image_idx]["annotations"].append(ann)
                         with open(ANNOTATIONS_FILE, "w") as f:
-                            json.dump(st.session_state["annotations"], f, indent=2)
+                            json.dump(st.session_state["projects"], f, indent=2)
+                        st.session_state["current_annotation"] = None
                         st.rerun()
-            except json.JSONDecodeError:
-                pass
 
-# ── AFFICHAGE, FILTRAGE & EXPORT ────────────────────────────────────────────────────
-if st.session_state["annotations"]:
-    st.subheader("Annotations enregistrées")
-    df = pd.DataFrame(st.session_state["annotations"])
-    st.dataframe(df)
+# ── 5) PAGE “Gérer” ───────────────────────────────────────────────────────────────
+elif page == "Gérer":
+    st.header("Gérer les annotations")
+    if not st.session_state["projects"]:
+        st.warning("Aucun projet existant.")
+    else:
+        project_names = [proj["project_name"] for proj in st.session_state["projects"] if "project_name" in proj]
+        selected_project = st.selectbox("Sélectionnez un projet", project_names)
+        project_idx = next(
+            i for i, proj in enumerate(st.session_state["projects"]) if proj["project_name"] == selected_project)
+        project = st.session_state["projects"][project_idx]
 
-    st.sidebar.subheader("Filtrer et traiter")
-    cats = df["category"].unique().tolist()
-    ivts = df["intervenant"].unique().tolist()
-    stats = df["status"].unique().tolist()
-    f_cats = st.sidebar.multiselect("Par catégorie", options=cats, default=cats)
-    f_ivts = st.sidebar.multiselect("Par intervenant", options=ivts, default=ivts)
-    f_stats = st.sidebar.multiselect("Par statut", options=stats, default=stats)
+        if not project["images"]:
+            st.warning("Aucune image dans ce projet.")
+        else:
+            image_names = [img["image_name"] for img in project["images"]]
+            selected_image = st.selectbox("Sélectionnez une image", image_names)
+            image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == selected_image)
+            image_data = project["images"][image_idx]
 
-    filtered = df[
-        df["category"].isin(f_cats) &
-        df["intervenant"].isin(f_ivts) &
-        df["status"].isin(f_stats)
-    ]
+            if not image_data["annotations"]:
+                st.warning("Aucune annotation pour cette image.")
+            else:
+                df = pd.DataFrame(image_data["annotations"])
+                st.write("### Toutes les annotations")
+                st.dataframe(df)
 
-    st.subheader("Annotations filtrées")
-    st.dataframe(filtered)
+                st.sidebar.header("Filtres")
+                cats = df["category"].unique().tolist()
+                ivts = df["intervenant"].unique().tolist()
+                stats = df["status"].unique().tolist()
+                f_cats = st.sidebar.multiselect("Catégorie", options=cats, default=cats)
+                f_ivts = st.sidebar.multiselect("Intervenant", options=ivts, default=ivts)
+                f_stats = st.sidebar.multiselect("Statut", options=stats, default=stats)
 
-    st.subheader("Modifier le statut")
-    idx = st.selectbox(
-        "Sélectionner une annotation",
-        filtered.index,
-        format_func=lambda i: f"{filtered.loc[i,'timestamp']} – {filtered.loc[i,'comment'][:30]}"
-    )
-    new_stt = st.selectbox("Nouveau statut", ["À faire", "En cours", "Résolu"], key="new_status")
-    if st.button("Mettre à jour"):
-        st.session_state["annotations"][idx]["status"] = new_stt
-        with open(ANNOTATIONS_FILE, "w") as f:
-            json.dump(st.session_state["annotations"], f, indent=2)
-        st.rerun()
+                filt = df[
+                    df["category"].isin(f_cats) &
+                    df["intervenant"].isin(f_ivts) &
+                    df["status"].isin(f_stats)
+                    ]
+                st.write("### Résultats filtrés")
+                st.dataframe(filt)
 
-    if st.button("Exporter en CSV"):
-        filtered.to_csv("annotations_export.csv", index=False)
-        st.success("Exporté sous 'annotations_export.csv'")
+                st.write("### Mettre à jour statut")
+                idx = st.selectbox(
+                    "Sélectionner une annotation",
+                    filt.index,
+                    format_func=lambda i: f"{filt.loc[i, 'timestamp']} – {filt.loc[i, 'comment'][:20]}"
+                )
+                new_stat = st.selectbox("Nouveau statut", ["À faire", "En cours", "Résolu"], key="upd_status")
+                if st.button("Mettre à jour"):
+                    project["images"][image_idx]["annotations"][idx]["status"] = new_stat
+                    with open(ANNOTATIONS_FILE, "w") as f:
+                        json.dump(st.session_state["projects"], f, indent=2)
+                    st.rerun()
+
+# ── 6) PAGE “Planning” ────────────────────────────────────────────────────────────
+elif page == "Planning":
+    st.header("Planning des tâches")
+    if not st.session_state["projects"]:
+        st.warning("Aucun projet existant.")
+    else:
+        project_names = [proj["project_name"] for proj in st.session_state["projects"] if "project_name" in proj]
+        selected_project = st.selectbox("Sélectionnez un projet", project_names)
+        project_idx = next(
+            i for i, proj in enumerate(st.session_state["projects"]) if proj["project_name"] == selected_project)
+        project = st.session_state["projects"][project_idx]
+
+        if not project["images"]:
+            st.warning("Aucune image dans ce projet.")
+        else:
+            image_names = [img["image_name"] for img in project["images"]]
+            selected_image = st.selectbox("Sélectionnez une image", image_names)
+            image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == selected_image)
+            image_data = project["images"][image_idx]
+
+            if not image_data["annotations"]:
+                st.warning("Aucune tâche planifiée pour cette image.")
+            else:
+                df = pd.DataFrame(image_data["annotations"])
+                if "due_date" in df.columns:
+                    df["due_date"] = pd.to_datetime(df["due_date"])
+                    dr = st.date_input("Plage de dates", [], key="cal_range")
+                    if len(dr) == 2:
+                        start, end = dr
+                        df = df[(df["due_date"] >= start) & (df["due_date"] <= end)]
+                    st.dataframe(df[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
+                else:
+                    st.info("Pas d’échéance disponible.")
