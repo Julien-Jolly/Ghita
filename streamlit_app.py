@@ -22,20 +22,13 @@ import msal, requests
 # Configuration globale
 st.set_page_config(page_title="BuildozAir Simplifié", layout="wide")
 
-ANNOTATIONS_FILE = "annotations.json"
-if not os.path.exists(ANNOTATIONS_FILE):
-    with open(ANNOTATIONS_FILE, "w") as f:
-        json.dump([], f)
-if "projects" not in st.session_state:
-    with open(ANNOTATIONS_FILE, "r") as f:
-        st.session_state["projects"] = json.load(f)
-
 # Configuration AWS S3
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_DEFAULT_REGION", "eu-north-1")
 S3_BUCKET_NAME = "jujul"
 S3_PREFIX = "buildozair/"
+S3_ANNOTATIONS_KEY = f"{S3_PREFIX}annotations.json"  # Clé pour le fichier annotations.json sur S3
 
 try:
     s3_client = boto3.client(
@@ -71,6 +64,31 @@ def download_from_s3(file_key):
         st.error(f"Erreur lors du téléchargement de {file_key} depuis S3 : {e}")
         return None
 
+def load_projects_from_s3():
+    try:
+        response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=S3_ANNOTATIONS_KEY)
+        projects = json.loads(response['Body'].read().decode('utf-8'))
+        return projects
+    except s3_client.exceptions.NoSuchKey:
+        return []
+    except Exception as e:
+        st.error(f"Erreur lors du chargement des projets depuis S3 : {e}")
+        return []
+
+def save_projects_to_s3(projects):
+    try:
+        s3_client.upload_fileobj(
+            io.BytesIO(json.dumps(projects, indent=2).encode('utf-8')),
+            S3_BUCKET_NAME,
+            S3_ANNOTATIONS_KEY
+        )
+    except Exception as e:
+        st.error(f"Erreur lors de la sauvegarde des projets sur S3 : {e}")
+
+# Charger les projets depuis S3 au démarrage
+if "projects" not in st.session_state:
+    st.session_state["projects"] = load_projects_from_s3()
+
 # Migration des anciennes données
 for project in st.session_state["projects"]:
     for image in project.get("images", []):
@@ -104,8 +122,7 @@ for project in st.session_state["projects"]:
                     st.error(f"Erreur lors de la lecture de {image_path} : {e}")
             else:
                 st.warning(f"Chemin {image_path} introuvable pour migration.")
-with open(ANNOTATIONS_FILE, "w") as f:
-    json.dump(st.session_state["projects"], f, indent=2)
+save_projects_to_s3(st.session_state["projects"])  # Sauvegarder après migration
 
 if not st.session_state["projects"] or not any("project_name" in proj for proj in st.session_state["projects"]):
     st.session_state["projects"] = [{"project_name": "Projet par défaut", "images": []}]
@@ -152,11 +169,23 @@ def load_image_from_bytes(uploaded_bytes, name):
 
 def delete_project(project_name):
     st.session_state["projects"] = [p for p in st.session_state["projects"] if p["project_name"] != project_name]
-    with open(ANNOTATIONS_FILE, "w") as f:
-        json.dump(st.session_state["projects"], f, indent=2)
+    save_projects_to_s3(st.session_state["projects"])
     if st.session_state["selected_project"] == project_name:
         st.session_state["selected_project"] = st.session_state["projects"][0]["project_name"] if st.session_state["projects"] else "Projet par défaut"
     st.rerun()
+
+# Générer un lien temporaire pour les fichiers S3
+def generate_s3_url(file_key):
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET_NAME, 'Key': file_key},
+            ExpiresIn=3600  # Lien valide pendant 1 heure
+        )
+        return url
+    except Exception as e:
+        st.error(f"Erreur lors de la génération du lien pour {file_key} : {e}")
+        return None
 
 # Pages
 st.sidebar.title("Navigation")
@@ -177,8 +206,7 @@ if page == "Annoter":
         new_project_name = st.text_input("Nom du nouveau projet")
         if st.button("Créer le projet") and new_project_name:
             st.session_state["projects"].append({"project_name": new_project_name, "images": []})
-            with open(ANNOTATIONS_FILE, "w") as f:
-                json.dump(st.session_state["projects"], f, indent=2)
+            save_projects_to_s3(st.session_state["projects"])
             st.session_state["selected_project"] = new_project_name
             st.rerun()
         else:
@@ -205,8 +233,7 @@ if page == "Annoter":
                 if image_key:
                     project_idx = next(i for i, proj in enumerate(st.session_state["projects"]) if proj["project_name"] == new_project_name)
                     st.session_state["projects"][project_idx]["images"].append({"image_name": name, "image_key": image_key, "annotations": []})
-                    with open(ANNOTATIONS_FILE, "w") as f:
-                        json.dump(st.session_state["projects"], f, indent=2)
+                    save_projects_to_s3(st.session_state["projects"])
                     st.rerun()
 
     else:
@@ -240,8 +267,7 @@ if page == "Annoter":
                     image_exists = any(img["image_name"] == name for img in project["images"])
                     if not image_exists:
                         project["images"].append({"image_name": name, "image_key": image_key, "annotations": []})
-                        with open(ANNOTATIONS_FILE, "w") as f:
-                            json.dump(st.session_state["projects"], f, indent=2)
+                        save_projects_to_s3(st.session_state["projects"])
                         st.rerun()
         else:
             image_idx = next(i for i, proj in enumerate(project["images"]) if proj["image_name"] == selected_image)
@@ -258,8 +284,7 @@ if page == "Annoter":
                         if image_key:
                             image_data["image_key"] = image_key
                             del image_data["image_path"]
-                            with open(ANNOTATIONS_FILE, "w") as f:
-                                json.dump(st.session_state["projects"], f, indent=2)
+                            save_projects_to_s3(st.session_state["projects"])
                         else:
                             st.warning(f"Échec de la migration de {name} vers S3.")
                     else:
@@ -282,13 +307,13 @@ if page == "Annoter":
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = (1 - ann["y"]) * h  # Correction : inversion de y (car Folium utilise un système de coordonnées inversé pour y)
+                    y = ann["y"] * h
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}", icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        bounds = [[h - (y + height), x], [h - y, x + width]]  # Correction des bounds pour rectangles
+                        bounds = [[y, x], [y + height, x + width]]
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2, popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False, draw_options={"polyline": False, "polygon": False, "circle": False, "circlemarker": False, "marker": True, "rectangle": True}, edit_options={"edit": True}).add_to(m)
                 st.subheader("Zoomer, déplacer et dessiner")
@@ -311,7 +336,7 @@ if page == "Annoter":
                     geom = feat["geometry"]
                     if geom["type"] == "Point":
                         y, x = geom["coordinates"]
-                        x_norm, y_norm = x/w, 1 - (y/h)  # Correction : inversion de y lors de la normalisation
+                        x_norm, y_norm = x/w, y/h
                         width_norm, height_norm = 0.0, 0.0
                         ann_type = "point"
                     else:
@@ -321,7 +346,7 @@ if page == "Annoter":
                         x_min, x_max = min(xs), max(xs)
                         y_min, y_max = min(ys), max(ys)
                         x_norm = x_min/w
-                        y_norm = 1 - (y_max/h)  # Correction : inversion de y pour rectangles
+                        y_norm = y_min/h
                         width_norm = (x_max - x_min)/w
                         height_norm = (y_max - y_min)/h
                         ann_type = "rectangle"
@@ -352,7 +377,7 @@ if page == "Annoter":
                     photo_path = None
                     if photo_file:
                         photo_name = f"photos/{photo_file.name}"
-                        photo_key = upload_to_s3(photo_name, photo_file.read())  # Stocker la photo sur S3
+                        photo_key = upload_to_s3(photo_name, photo_file.read())
                         if photo_key:
                             photo_path = photo_key
                     if st.sidebar.button("Enregistrer l'annotation"):
@@ -360,8 +385,7 @@ if page == "Annoter":
                         ann.update({"category": category, "intervenant": intervenant, "comment": comment, "photo": photo_path, "status": status, "due_date": due_date.strftime("%Y-%m-%d")})
                         image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == name)
                         project["images"][image_idx]["annotations"].append(ann)
-                        with open(ANNOTATIONS_FILE, "w") as f:
-                            json.dump(st.session_state["projects"], f, indent=2)
+                        save_projects_to_s3(st.session_state["projects"])
                         st.session_state["current_annotation"] = None
                         st.rerun()
 
@@ -387,7 +411,12 @@ elif page == "Gérer":
                     if uploaded_bytes:
                         img = load_image_from_bytes(uploaded_bytes, image["image_name"])
                         if img:
-                            st.image(img, caption=image["image_name"], use_container_width=True)  # Correction : use_container_width
+                            # Générer un lien temporaire pour l'image
+                            image_url = generate_s3_url(image["image_key"])
+                            if image_url:
+                                # Afficher une vignette cliquable
+                                st.markdown(f'<a href="{image_url}" target="_blank"><img src="{image_url}" width="200"></a>', unsafe_allow_html=True)
+                                st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
                 if image["annotations"]:
                     df = pd.DataFrame(image["annotations"])
                     st.write("### Annotations")
@@ -426,8 +455,7 @@ elif page == "Gérer":
                             if ann["timestamp"] == filt.loc[idx, "timestamp"]:
                                 ann["status"] = new_stat
                                 break
-                        with open(ANNOTATIONS_FILE, "w") as f:
-                            json.dump(st.session_state["projects"], f, indent=2)
+                        save_projects_to_s3(st.session_state["projects"])
                         st.rerun()
 
 elif page == "Planning":
@@ -445,14 +473,12 @@ elif page == "Planning":
         else:
             all_annotations = pd.concat([pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]], ignore_index=True)
             if not all_annotations.empty and "due_date" in all_annotations.columns:
-                # Convertir les due_date en datetime, en ignorant les valeurs vides ou mal formatées
                 all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
                 dr = st.date_input("Plage de dates", [], key="cal_range")
                 if len(dr) == 2:
                     start, end = dr
                     start = pd.to_datetime(start)
                     end = pd.to_datetime(end)
-                    # Filtrer en ignorant les lignes où due_date est NaT
                     filt = all_annotations[all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (all_annotations["due_date"] <= end)]
                     if not filt.empty:
                         st.dataframe(filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
