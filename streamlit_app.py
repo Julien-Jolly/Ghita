@@ -327,9 +327,13 @@ if page == "Annoter":
                     st.stop()
                 map_key = f"{selected_project}_{selected_image}"
                 saved_state = st.session_state["map_state"].get(map_key, {})
-                default_center = saved_state.get("center", [h / 2, w / 2]) if isinstance(saved_state.get("center"),
-                                                                                         (list, tuple)) and len(
-                    saved_state.get("center")) == 2 else [h / 2, w / 2]
+                # Validation stricte de default_center
+                center = saved_state.get("center")
+                if not center or not isinstance(center, (list, tuple)) or len(center) != 2 or not all(
+                        isinstance(c, (int, float)) for c in center):
+                    default_center = [h / 2, w / 2]
+                else:
+                    default_center = [float(c) for c in center]
                 default_zoom = saved_state.get("zoom", 0)
                 m = folium.Map(
                     location=default_center,
@@ -480,7 +484,8 @@ elif page == "Gérer":
                     if uploaded_bytes:
                         img = load_image_from_bytes(uploaded_bytes, image["image_name"])
                         if img:
-                            st.image(img, width=200, caption=f"Thumbnail de {image['image_name']}")
+                            st.image(img, width=200, caption=f"Thumbnail de {image['image_name']}",
+                                     key=f"thumb_{selected_project}_{i}")
                             image_url = generate_s3_url(image["image_key"])
                             if image_url:
                                 st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
