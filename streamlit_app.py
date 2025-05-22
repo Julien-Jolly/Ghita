@@ -327,24 +327,27 @@ if page == "Annoter":
                 image_idx = next(i for i, img in enumerate(project["images"]) if img["image_name"] == name)
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
-                    x = ann["x"] * w
-                    y = ann["y"] * h
+                    x_pix = ann["x"] * w
+                    y_pix = ann["y"] * h
+
                     if ann["type"] == "point":
-                        folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}",
-                                      icon=folium.Icon(color="red", icon="circle")).add_to(m)
-                    elif ann["type"] == "rectangle":
-                        width = ann["width"] * w
-                        height = ann["height"] * h
-                        y0 = ann["y"] * h
-                        x0 = ann["x"] * w
-                        h_px = ann["height"] * h
+                        folium.Marker(
+                            location=[y_pix, x_pix],
+                            popup=ann["comment"],
+                            icon=folium.Icon(color="red", icon="circle")
+                        ).add_to(m)
+                    else:
                         w_px = ann["width"] * w
+                        h_px = ann["height"] * h
                         bounds = [
-                            [y0, x0],  # coin sup-gauche
-                            [y0 + h_px, x0 + w_px]  # coin inf-droit
+                            [y_pix, x_pix],  # coin supérieur-gauche
+                            [y_pix + h_px, x_pix + w_px]  # coin inférieur-droit
                         ]
-                        folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
-                                         popup=f"Rectangle: {ann['comment']}").add_to(m)
+                        folium.Rectangle(
+                            bounds=bounds,
+                            color="blue", fill=True, fill_opacity=0.2,
+                            popup=ann["comment"]
+                        ).add_to(m)
                 Draw(export=False,
                      draw_options={"polyline": False, "polygon": False, "circle": False, "circlemarker": False,
                                    "marker": True, "rectangle": True}, edit_options={"edit": True}).add_to(m)
@@ -368,19 +371,21 @@ if page == "Annoter":
                         feat = feats[-1]
                         geom = feat["geometry"]
                         if geom["type"] == "Point":
-                            lat, lon = geom["coordinates"]
-                            x_norm = lon / w
-                            y_norm = lat / h  # ← plus d’inversion
-                            width_norm, height_norm = 0.0, 0.0
+                            # GeoJSON Point: [x, y]
+                            x_pix, y_pix = geom["coordinates"]
+                            x_norm = x_pix / w
+                            y_norm = y_pix / h
+                            width_norm = height_norm = 0.0
                             ann_type = "point"
                         else:
+                            # GeoJSON Polygon: [[[x1,y1], [x2,y2], …]]
                             coords = geom["coordinates"][0][:-1]
-                            xs = [pt[1] for pt in coords]
-                            ys = [pt[0] for pt in coords]
+                            xs = [pt[0] for pt in coords]
+                            ys = [pt[1] for pt in coords]
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             x_norm = x_min / w
-                            y_norm = y_min / h  # ← plus d’inversion
+                            y_norm = y_min / h
                             width_norm = (x_max - x_min) / w
                             height_norm = (y_max - y_min) / h
                             ann_type = "rectangle"
@@ -463,10 +468,16 @@ elif page == "Gérer":
                 if "image_key" in image:
                     image_url = generate_s3_url(image["image_key"])
                     if image_url:
+                        # Affiche une miniature 200px cliquable
                         st.markdown(
-                            f'<a href="{image_url}" target="_blank"><img src="{image_url}" width="200" style="object-fit:cover;"></a>',
-                            unsafe_allow_html=True)
-                        st.write(f"[Ouvrir l'image dans un nouvel onglet]({image_url})")
+                            f'''
+                            <a href="{image_url}" target="_blank">
+                              <img src="{image_url}" width="200" style="object-fit:cover; border:1px solid #ccc; margin-bottom:4px;" />
+                            </a>
+                            ''',
+                            unsafe_allow_html=True
+                        )
+                        st.write(f"[Ouvrir le plan en grand]({image_url})")
                     else:
                         st.warning("Impossible de générer le lien pour cette image.")
                 if image["annotations"]:
@@ -477,10 +488,18 @@ elif page == "Gérer":
                         st.write(
                             f"Type: {row['type']}, Statut: {row['status']}, Catégorie: {row['category']}, Intervenant: {row['intervenant']}, Échéance: {row['due_date']}")
                         if row['photo']:
-                            photo_bytes = download_from_s3(row['photo'])
-                            if photo_bytes:
-                                photo_img = Image.open(io.BytesIO(photo_bytes))
-                                st.image(photo_img, caption="Photo associée", use_container_width=True)
+                            photo_url = generate_s3_url(row['photo'])
+                            if photo_url:
+                                # Affiche une miniature 100px cliquable
+                                st.markdown(
+                                    f'''
+                                    <a href="{photo_url}" target="_blank">
+                                      <img src="{photo_url}" width="100" style="object-fit:cover; border:1px solid #ccc; margin-bottom:4px;" />
+                                    </a>
+                                    ''',
+                                    unsafe_allow_html=True,
+                                )
+                                st.write(f"[Voir la photo]({photo_url})")
                             else:
                                 st.warning("Impossible de charger la photo associée.")
                     st.dataframe(df)
