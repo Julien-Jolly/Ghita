@@ -328,15 +328,21 @@ if page == "Annoter":
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = (1 - ann["y"]) * h  # Inversion de l'axe Y pour correspondre à Folium (0 en bas)
+                    y = ann["y"] * h
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}",
                                       icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
-                                  [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]  # Ajustement pour inversion Y
+                        y0 = ann["y"] * h
+                        x0 = ann["x"] * w
+                        h_px = ann["height"] * h
+                        w_px = ann["width"] * w
+                        bounds = [
+                            [y0, x0],  # coin sup-gauche
+                            [y0 + h_px, x0 + w_px]  # coin inf-droit
+                        ]
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                          popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False,
@@ -362,8 +368,9 @@ if page == "Annoter":
                         feat = feats[-1]
                         geom = feat["geometry"]
                         if geom["type"] == "Point":
-                            y, x = geom["coordinates"]
-                            x_norm, y_norm = x / w, 1 - (y / h)  # Inversion Y lors de la normalisation
+                            lat, lon = geom["coordinates"]
+                            x_norm = lon / w
+                            y_norm = lat / h  # ← plus d’inversion
                             width_norm, height_norm = 0.0, 0.0
                             ann_type = "point"
                         else:
@@ -373,7 +380,7 @@ if page == "Annoter":
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             x_norm = x_min / w
-                            y_norm = 1 - (y_max / h)  # Inversion Y
+                            y_norm = y_min / h  # ← plus d’inversion
                             width_norm = (x_max - x_min) / w
                             height_norm = (y_max - y_min) / h
                             ann_type = "rectangle"
@@ -490,15 +497,21 @@ elif page == "Gérer":
                                                               cross_origin=False, opacity=1).add_to(m)
                             for ann in image["annotations"]:
                                 x = ann["x"] * w
-                                y = (1 - ann["y"]) * h  # Inversion Y
+                                y = ann["y"] * h
                                 if ann["type"] == "point":
                                     folium.Marker(location=[y, x], popup=f"{ann['comment']} (Statut: {ann['status']})",
                                                   icon=folium.Icon(color="red", icon="circle")).add_to(m)
                                 elif ann["type"] == "rectangle":
                                     width = ann["width"] * w
                                     height = ann["height"] * h
-                                    bounds = [[(1 - ann["y"] - ann["height"]) * h, ann["x"] * w],
-                                              [(1 - ann["y"]) * h, (ann["x"] + ann["width"]) * w]]
+                                    y0 = ann["y"] * h
+                                    x0 = ann["x"] * w
+                                    h_px = ann["height"] * h
+                                    w_px = ann["width"] * w
+                                    bounds = [
+                                        [y0, x0],  # coin supérieur gauche
+                                        [y0 + h_px, x0 + w_px]  # coin inférieur droit
+                                    ]
                                     folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                                      popup=f"{ann['comment']} (Statut: {ann['status']})").add_to(m)
                             st_folium(m, width=800, height=400,
