@@ -322,10 +322,14 @@ if page == "Annoter":
             if image:
                 arr = np.array(image)
                 h, w = arr.shape[:2]
+                if h <= 0 or w <= 0:
+                    st.error("Dimensions de l'image invalides.")
+                    st.stop()
                 map_key = f"{selected_project}_{selected_image}"
-                # Restaurer le centre et le zoom depuis l'état
                 saved_state = st.session_state["map_state"].get(map_key, {})
-                default_center = saved_state.get("center", [h / 2, w / 2])
+                default_center = saved_state.get("center", [h / 2, w / 2]) if isinstance(saved_state.get("center"),
+                                                                                         (list, tuple)) and len(
+                    saved_state.get("center")) == 2 else [h / 2, w / 2]
                 default_zoom = saved_state.get("zoom", 0)
                 m = folium.Map(
                     location=default_center,
@@ -342,15 +346,14 @@ if page == "Annoter":
                 annotations = project["images"][image_idx]["annotations"]
                 for ann in annotations:
                     x = ann["x"] * w
-                    y = (1 - ann["y"]) * h  # Inversion Y
+                    y = (1 - ann["y"]) * h
                     if ann["type"] == "point":
                         folium.Marker(location=[y, x], popup=f"Point: {ann['comment']}",
                                       icon=folium.Icon(color="red", icon="circle")).add_to(m)
                     elif ann["type"] == "rectangle":
                         width = ann["width"] * w
                         height = ann["height"] * h
-                        # Ajustement des bounds pour éviter la rotation
-                        bounds = [[y - height, x], [y, x + width]]  # De (x,y-height) à (x+width,y)
+                        bounds = [[y - height, x], [y, x + width]]
                         folium.Rectangle(bounds=bounds, color="blue", fill=True, fill_opacity=0.2,
                                          popup=f"Rectangle: {ann['comment']}").add_to(m)
                 Draw(export=False,
@@ -359,7 +362,6 @@ if page == "Annoter":
                 st.subheader("Zoomer, déplacer et dessiner")
                 out = st_folium(m, width=800, height=600, returned_objects=["all_drawings", "center", "zoom"],
                                 key=f"folium_map_{selected_project}_{selected_image}")
-                # Sauvegarder le centre et le zoom
                 if out:
                     st.session_state["map_state"][map_key] = {
                         "center": out.get("center", [h / 2, w / 2]),
@@ -383,7 +385,7 @@ if page == "Annoter":
                         geom = feat["geometry"]
                         if geom["type"] == "Point":
                             y, x = geom["coordinates"]
-                            x_norm, y_norm = x / w, 1 - (y / h)  # Inversion Y
+                            x_norm, y_norm = x / w, 1 - (y / h)
                             width_norm, height_norm = 0.0, 0.0
                             ann_type = "point"
                         else:
@@ -393,7 +395,7 @@ if page == "Annoter":
                             x_min, x_max = min(xs), max(xs)
                             y_min, y_max = min(ys), max(ys)
                             x_norm = x_min / w
-                            y_norm = 1 - (y_max / h)  # Inversion Y
+                            y_norm = 1 - (y_max / h)
                             width_norm = (x_max - x_min) / w
                             height_norm = (y_max - y_min) / h
                             ann_type = "rectangle"
@@ -525,36 +527,39 @@ elif page == "Gérer":
                                       key=f"manage_map_{selected_project}_{image['image_name']}")
                 else:
                     st.write("Aucune annotation pour cette image.")
-            st.sidebar.header("Filtres")
-            if project["images"]:
+            # Gestion des filtres uniquement s'il y a des annotations
+            if any(img["annotations"] for img in project["images"]):
                 all_annotations = pd.concat(
                     [pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]],
-                    ignore_index=True)
-                if not all_annotations.empty:
-                    cats = all_annotations["category"].unique().tolist()
-                    ivts = all_annotations["intervenant"].unique().tolist()
-                    stats = all_annotations["status"].unique().tolist()
-                    f_cats = st.sidebar.multiselect("Catégorie", options=cats, default=cats)
-                    f_ivts = st.sidebar.multiselect("Intervenant", options=ivts, default=ivts)
-                    f_stats = st.sidebar.multiselect("Statut", options=stats, default=stats)
-                    filt = all_annotations[
-                        all_annotations["category"].isin(f_cats) & all_annotations["intervenant"].isin(f_ivts) &
-                        all_annotations["status"].isin(f_stats)]
-                    st.write("### Résultats filtrés")
-                    st.dataframe(filt)
-                    st.write("### Mettre à jour statut")
-                    idx = st.selectbox("Sélectionner une annotation", filt.index, format_func=lambda
-                        i: f"{filt.loc[i, 'timestamp']} – {filt.loc[i, 'comment'][:20]}")
-                    image_idx = next(i for i, img in enumerate(project["images"]) if
-                                     any(ann["timestamp"] == filt.loc[idx, "timestamp"] for ann in img["annotations"]))
-                    new_stat = st.selectbox("Nouveau statut", ["À faire", "En cours", "Résolu"], key="upd_status")
-                    if st.button("Mettre à jour"):
-                        for ann in project["images"][image_idx]["annotations"]:
-                            if ann["timestamp"] == filt.loc[idx, "timestamp"]:
-                                ann["status"] = new_stat
-                                break
-                        save_projects_to_s3(st.session_state["projects"])
-                        st.rerun()
+                    ignore_index=True
+                )
+                st.sidebar.header("Filtres")
+                cats = all_annotations["category"].unique().tolist()
+                ivts = all_annotations["intervenant"].unique().tolist()
+                stats = all_annotations["status"].unique().tolist()
+                f_cats = st.sidebar.multiselect("Catégorie", options=cats, default=cats)
+                f_ivts = st.sidebar.multiselect("Intervenant", options=ivts, default=ivts)
+                f_stats = st.sidebar.multiselect("Statut", options=stats, default=stats)
+                filt = all_annotations[
+                    all_annotations["category"].isin(f_cats) & all_annotations["intervenant"].isin(f_ivts) &
+                    all_annotations["status"].isin(f_stats)]
+                st.write("### Résultats filtrés")
+                st.dataframe(filt)
+                st.write("### Mettre à jour statut")
+                idx = st.selectbox("Sélectionner une annotation", filt.index,
+                                   format_func=lambda i: f"{filt.loc[i, 'timestamp']} – {filt.loc[i, 'comment'][:20]}")
+                image_idx = next(i for i, img in enumerate(project["images"]) if
+                                 any(ann["timestamp"] == filt.loc[idx, "timestamp"] for ann in img["annotations"]))
+                new_stat = st.selectbox("Nouveau statut", ["À faire", "En cours", "Résolu"], key="upd_status")
+                if st.button("Mettre à jour"):
+                    for ann in project["images"][image_idx]["annotations"]:
+                        if ann["timestamp"] == filt.loc[idx, "timestamp"]:
+                            ann["status"] = new_stat
+                            break
+                    save_projects_to_s3(st.session_state["projects"])
+                    st.rerun()
+            else:
+                st.sidebar.write("Aucune annotation à filtrer.")
 
 elif page == "Planning":
     st.header("Planning des tâches")
@@ -571,22 +576,25 @@ elif page == "Planning":
         if not project["images"]:
             st.warning("Aucune image dans ce projet.")
         else:
-            all_annotations = pd.concat(
-                [pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]],
-                ignore_index=True)
-            if not all_annotations.empty and "due_date" in all_annotations.columns:
-                all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
-                dr = st.date_input("Plage de dates", [], key="cal_range")
-                if len(dr) == 2:
-                    start, end = dr
-                    start = pd.to_datetime(start)
-                    end = pd.to_datetime(end)
-                    filt = all_annotations[
-                        all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (
-                                    all_annotations["due_date"] <= end)]
-                    if not filt.empty:
-                        st.dataframe(filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
-                    else:
-                        st.info("Aucune tâche dans cette plage de dates.")
+            annotations_list = [pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]]
+            if annotations_list:
+                all_annotations = pd.concat(annotations_list, ignore_index=True)
+                if "due_date" in all_annotations.columns:
+                    all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
+                    dr = st.date_input("Plage de dates", [], key="cal_range")
+                    if len(dr) == 2:
+                        start, end = dr
+                        start = pd.to_datetime(start)
+                        end = pd.to_datetime(end)
+                        filt = all_annotations[
+                            all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (
+                                        all_annotations["due_date"] <= end)]
+                        if not filt.empty:
+                            st.dataframe(
+                                filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
+                        else:
+                            st.info("Aucune tâche dans cette plage de dates.")
+                else:
+                    st.info("Pas d’échéance disponible.")
             else:
-                st.info("Pas d’échéance disponible.")
+                st.info("Aucune annotation enregistrée dans ce projet.")
