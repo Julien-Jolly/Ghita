@@ -5,8 +5,14 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageDraw
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
+from reportlab.platypus import Table, TableStyle, Image as RLImage
+from reportlab.lib import colors
 import io, os, json
+from io import BytesIO
+import os.path
 
 # PDF → Image
 from pdf2image import convert_from_bytes
@@ -139,6 +145,8 @@ if "current_annotation" not in st.session_state:
     st.session_state["current_annotation"] = None
 if "last_drawings" not in st.session_state:
     st.session_state["last_drawings"] = []
+if "map_state" not in st.session_state:
+    st.session_state["map_state"] = {}
 
 # OneDrive configuration
 CLIENT_ID = "votre_client_id"
@@ -159,6 +167,108 @@ def list_onedrive_files():
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
     return resp.json().get("value", [])
+
+
+def generate_planning_pdf(pil_img, df_all_annotations, df_plan, start_date, end_date):
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=landscape(A4))
+    width, height = landscape(A4)
+
+    # --- PAGE 1 : plan annoté plein cadre ---
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(width/2, height - 40, "Plan annoté")
+    c.setFont("Helvetica", 12)
+    subtitle = f"Période : {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}"
+    c.drawCentredString(width/2, height - 60, subtitle)
+
+    # 1) On passe l'image PIL en buffer PNG (sans inversion)
+    img_buffer = BytesIO()
+    pil_img.save(img_buffer, format="PNG")
+    img_buffer.seek(0)
+
+    # 2) On calcule la taille dans le PDF (90% de la largeur, ratio conservé)
+    img_w = width * 0.9
+    img_h = img_w * (pil_img.height / pil_img.width)
+    max_img_h = height - 120
+    if img_h > max_img_h:
+        img_h = max_img_h
+        img_w = img_h * (pil_img.width / pil_img.height)
+    x_img = (width - img_w) / 2
+    y_img = height - 100 - img_h
+
+    # 3) On dessine l'image (déjà annotée)
+    RLImage(img_buffer, width=img_w, height=img_h).drawOn(c, x_img, y_img)
+
+    # 4) Optionnel : cadre autour de l'image
+    c.rect(x_img, y_img, img_w, img_h, stroke=1, fill=0)
+
+    # pied de page
+    c.setFont("Helvetica", 8)
+    c.drawRightString(width - 20, 10, "Page 1/2")
+    c.showPage()
+
+    # --- PAGE 2 : tableaux ---
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(width/2, height - 40, "Détails des annotations et planning")
+
+    margin = 20
+    y = height - 80
+
+    # 1) Toutes les annotations
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "1) Toutes les annotations")
+    y -= 20
+
+    data1 = [["Timestamp", "Catégorie", "Intervenant", "Commentaire", "Statut", "Échéance"]]
+    for _, r in df_all_annotations.iterrows():
+        data1.append([
+            str(r["timestamp"]),
+            r["category"],
+            r["intervenant"],
+            r["comment"],
+            r["status"],
+            r["due_date"].date().isoformat()
+        ])
+    tbl1 = Table(data1, colWidths=[80, 60, 60, 180, 60, 60])
+    tbl1.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ]))
+    w1, h1 = tbl1.wrapOn(c, width - 2 * margin, y)
+    tbl1.drawOn(c, margin, y - h1)
+    y -= h1 + 40
+
+    # 2) Planning filtré
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "2) Planning des tâches")
+    y -= 20
+
+    data2 = [["Timestamp", "Catégorie", "Intervenant", "Commentaire", "Statut", "Échéance"]]
+    for _, r in df_plan.iterrows():
+        data2.append([
+            str(r["timestamp"]),
+            r["category"],
+            r["intervenant"],
+            r["comment"],
+            r["status"],
+            r["due_date"].date().isoformat()
+        ])
+    tbl2 = Table(data2, colWidths=[80, 60, 60, 180, 60, 60])
+    tbl2.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ]))
+    w2, h2 = tbl2.wrapOn(c, width - 2 * margin, y)
+    tbl2.drawOn(c, margin, y - h2)
+
+    c.setFont("Helvetica", 8)
+    c.drawRightString(width - 20, 10, "Page 2/2")
+
+    c.save()
+    buffer.seek(0)
+    return buffer
 
 
 def load_image_from_bytes(uploaded_bytes, name):
@@ -583,22 +693,74 @@ elif page == "Planning":
         if not project["images"]:
             st.warning("Aucune image dans ce projet.")
         else:
-            all_annotations = pd.concat(
-                [pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]],
-                ignore_index=True)
-            if not all_annotations.empty and "due_date" in all_annotations.columns:
-                all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
-                dr = st.date_input("Plage de dates", [], key="cal_range")
-                if len(dr) == 2:
-                    start, end = dr
-                    start = pd.to_datetime(start)
-                    end = pd.to_datetime(end)
-                    filt = all_annotations[
-                        all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (
-                                    all_annotations["due_date"] <= end)]
-                    if not filt.empty:
-                        st.dataframe(filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
-                    else:
-                        st.info("Aucune tâche dans cette plage de dates.")
+            annotations_list = [pd.DataFrame(img["annotations"]) for img in project["images"] if img["annotations"]]
+            if annotations_list:
+                all_annotations = pd.concat(annotations_list, ignore_index=True)
+                if "due_date" in all_annotations.columns:
+                    all_annotations["due_date"] = pd.to_datetime(all_annotations["due_date"], errors='coerce')
+                    dr = st.date_input("Plage de dates", [], key="cal_range")
+                    if len(dr) == 2:
+                        start, end = dr
+                        start = pd.to_datetime(start)
+                        end = pd.to_datetime(end)
+                        filt = all_annotations[
+                            all_annotations["due_date"].notna() & (all_annotations["due_date"] >= start) & (
+                                        all_annotations["due_date"] <= end)]
+                        if not filt.empty:
+                            st.dataframe(
+                                filt[["timestamp", "category", "intervenant", "comment", "status", "due_date"]])
+                            # Génération du PDF avec l'image annotée
+                            if st.button("Générer PDF"):
+                                # 1) Récupérez d’abord l’octet de l’image depuis S3
+                                image_data = project["images"][0]  # ou l’index que vous voulez
+                                uploaded_bytes = download_from_s3(image_data["image_key"])
+                                # 2) Chargez vraiment l’image en PIL
+                                pil_img = load_image_from_bytes(uploaded_bytes, image_data["image_name"])
+                                if pil_img is None:
+                                    st.error("Impossible de charger le plan pour PDF")
+                                else:
+                                    # 3) Convertissez-la en RGB et dessinez vos annotations
+                                    img = pil_img.convert("RGB")
+                                    draw = ImageDraw.Draw(img)
+                                    w, h = img.size
+                                    for _, ann in filt.iterrows():
+                                        x_pix = ann["x"] * w
+                                        # Inverser la coordonnée Y pour correspondre au système ReportLab
+                                        y_pix = (1 - ann["y"]) * h
+                                        if ann["type"] == "point":
+                                            r = 10
+                                            draw.ellipse(
+                                                [x_pix - r, y_pix - r, x_pix + r, y_pix + r],
+                                                fill="red",
+                                                outline="black"
+                                            )
+                                        else:
+                                            w_px = ann["width"] * w
+                                            h_px = ann["height"] * h
+                                            # Ajuster le rectangle avec l'inversion Y correcte
+                                            y_top = y_pix  # Coin supérieur (inversé)
+                                            y_bottom = y_pix - h_px  # Coin inférieur
+                                            draw.rectangle([x_pix, y_bottom, x_pix + w_px, y_top],
+                                                           outline="blue", width=2)
+
+                                    # 4) Puis passez img à votre générateur ReportLab
+                                    # Construisez d’abord annotation_desc avant d’appeler le PDF :
+                                    annotation_desc = []
+                                    for _, ann in filt.iterrows():
+                                        pos = f"x={ann['x']:.2f}, y={ann['y']:.2f}"
+                                        if ann['type'] == "rectangle":
+                                            pos += f", largeur={ann['width']:.2f}, hauteur={ann['height']:.2f}"
+                                        annotation_desc.append(
+                                            f"{ann['type'].capitalize()} à {pos} – {ann['comment']} (Statut : {ann['status']})"
+                                        )
+
+                                    # Puis :
+                                    pdf_buffer = generate_planning_pdf(img, all_annotations, filt, start, end)
+                                    st.download_button("Télécharger le PDF", data=pdf_buffer,
+                                                       file_name="planning.pdf", mime="application/pdf")
+                        else:
+                            st.info("Aucune tâche dans cette plage de dates.")
+                else:
+                    st.info("Pas d’échéance disponible.")
             else:
-                st.info("Pas d’échéance disponible.")
+                st.info("Aucune annotation enregistrée dans ce projet.")
